@@ -13,6 +13,7 @@
 | 唤醒耗电 | 在 system_server 中 hook `PowerManagerService` / `AlarmManagerService`，统计每个应用的 PARTIAL 唤醒锁持有时长和唤醒型闹钟次数；同时显示内核 `/sys/class/wakeup` 唤醒源 |
 | 一键清理 | 强行停止异常应用、杀死异常进程和模块进程；可在设置中开启"直接**禁用**异常的 KSU / LSP 模块" |
 | 单项操作 | 应用：强行停止 / 停用（冻结）/ 重新启用；进程：杀死；KSU 模块：禁用 / 启用（优先 `ksud module disable`，失败则写 `disable` 标记文件）；LSP 模块：禁用 / 启用 |
+| 悬浮窗 | 在任意界面上方实时显示温度、功耗和发热最高的 5 个进程 / 应用；可拖动，轻点展开 / 收起；通知栏常驻并可一键关闭，熄屏自动暂停采样 |
 
 ## 工作模式
 
@@ -40,7 +41,7 @@ App 界面 (MainActivity)  ──stdin/stdout 行协议──▶  常驻进程�
 LSPosed（作用域：系统框架）── HookEntry hook system_server ──▶ /data/system/thermalhunter/stats.json ──▶ 由 root 进程读取
 ```
 
-- 只有界面可见时才采样；离开页面即停止，App 退出时 root 进程随之结束。**本工具自身不会在后台耗电。**
+- 只有界面可见（或悬浮窗开启且亮屏）时才采样；没有订阅者 60 秒后后台进程自动退出。**本工具自身不会在后台持续耗电。**
 - 保护名单（`core/Protect.java`）：system_server、zygote、surfaceflinger、lmkd、ksud、lspd、系统界面、vivo 桌面与电源管理组件、root / LSPosed 管理器等。这些对象不允许杀死或停用，防止死机、重启或掉 root。
 
 ## 编译

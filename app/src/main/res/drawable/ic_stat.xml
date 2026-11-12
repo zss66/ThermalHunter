@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知栏图标：温度计（单色） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFFFF" android:fillType="evenOdd"
+        android:pathData="M47,24a7,7 0,0 1,14 0v34.5a14,14 0,1 1,-14 0z M51,40h6v22.5a8,8 0,1 1,-6 0z" />
+</vector>

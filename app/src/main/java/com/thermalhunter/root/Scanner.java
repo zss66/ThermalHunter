@@ -558,7 +558,7 @@ final class Scanner {
             long t = Sys.readLong(base + "/" + n + "/temp", Long.MIN_VALUE);
             if (type == null || t == Long.MIN_VALUE) continue;
             double c = Math.abs(t) > 1000 ? t / 1000.0 : t;
-            if (c < -30 || c > 150) continue;
+            if (!validTemp(c)) continue;
             JSONObject o = new JSONObject();
             o.put("type", type);
             o.put("temp", round1(c));
@@ -566,6 +566,11 @@ final class Scanner {
         }
         if (arr.length() == 0) thermalFromService(arr);
         return arr;
+    }
+
+    /** 过滤无效读数：联发科等平台上未启用/失效的传感器常报 125°C、127°C 之类的占位值。 */
+    private static boolean validTemp(double c) {
+        return c > -30 && c < 120;
     }
 
     private static final java.util.regex.Pattern THERMAL_RE = java.util.regex.Pattern.compile(
@@ -591,7 +596,7 @@ final class Scanner {
             } catch (NumberFormatException e) {
                 continue;
             }
-            if (t < -30 || t > 150) continue;
+            if (!validTemp(t)) continue;
             // Temperature.TYPE_CPU=0, GPU=1, BATTERY=2, SKIN=3
             String prefix = type == 0 ? "cpu" : type == 1 ? "gpu" : type == 2 ? "battery" : type == 3 ? "skin" : "";
             JSONObject o = new JSONObject();
