@@ -64,6 +64,9 @@ public class MainActivity extends Activity implements Monitor.Listener {
     private LinearLayout hero, clusterRow;
     private ImageView floatBtn;
     private final int[] tabCounts = new int[TABS.length];
+    // 只在状态变化时重设背景，避免每次刷新都重绘
+    private int[] lastGrad;
+    private int lastCleanState = -1;
     private final TextView[] tabViews = new TextView[TABS.length];
     private ListView list;
     private Button cleanBtn;
@@ -335,7 +338,11 @@ public class MainActivity extends Activity implements Monitor.Listener {
         heroTempSub.setText(TextUtils.join("  ·  ", tsub));
         double hot = Math.max(r.maxTemp, r.skinTemp);
         if (hot <= -999) hot = r.batteryTemp;
-        hero.setBackground(Ui.gradient(Ui.heatGradient(hot), u.dp(24)));
+        int[] grad = Ui.heatGradient(hot);
+        if (grad != lastGrad) {
+            lastGrad = grad;
+            hero.setBackground(Ui.gradient(grad, u.dp(24)));
+        }
         JSONObject bat = s.optJSONObject("battery");
         if (bat != null) {
             long ma = Math.abs(bat.optLong("currentMa"));
@@ -385,7 +392,11 @@ public class MainActivity extends Activity implements Monitor.Listener {
         else banner(TextUtils.join("\n", notes), shell ? u.accent : u.warn);
 
         cleanBtn.setText(r.badCount > 0 ? "一键清理异常（" + r.badCount + "）" : "一键清理异常");
-        cleanBtn.setBackground(u.ripple(Ui.round(r.badCount > 0 ? u.bad : u.accent, u.dp(26))));
+        int cleanState = r.badCount > 0 ? 1 : 0;
+        if (cleanState != lastCleanState) {
+            lastCleanState = cleanState;
+            cleanBtn.setBackground(u.ripple(Ui.round(cleanState == 1 ? u.bad : u.accent, u.dp(26))));
+        }
         tabCounts[0] = flagged(r.heat);
         tabCounts[1] = flagged(r.ksu);
         tabCounts[2] = flagged(r.lsp);
@@ -1057,9 +1068,13 @@ public class MainActivity extends Activity implements Monitor.Listener {
             }
             u.bindAvatar(h.avatar, e, name);
 
-            GradientDrawable bgd = Ui.round(e.level == Analyzer.BAD ? u.badCard : u.card, u.dp(18));
-            bgd.setStroke(u.dp(1), e.level == Analyzer.BAD ? Ui.alpha(u.bad, 0x55) : u.stroke);
-            h.card.setBackground(u.ripple(bgd));
+            boolean badCard = e.level == Analyzer.BAD;
+            if (h.badBg == null || h.badBg != badCard) {
+                h.badBg = badCard;
+                GradientDrawable bgd = Ui.round(badCard ? u.badCard : u.card, u.dp(18));
+                bgd.setStroke(u.dp(1), badCard ? Ui.alpha(u.bad, 0x55) : u.stroke);
+                h.card.setBackground(u.ripple(bgd));
+            }
             h.card.setAlpha(e.enabled ? 1f : 0.55f);
             return convert;
         }
@@ -1070,5 +1085,6 @@ public class MainActivity extends Activity implements Monitor.Listener {
         FrameLayout avatar;
         Ui.Bar bar;
         TextView title, sub, metrics, reasons, badge, value, caption;
+        Boolean badBg;
     }
 }

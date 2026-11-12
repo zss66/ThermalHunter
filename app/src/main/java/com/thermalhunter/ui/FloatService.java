@@ -64,6 +64,8 @@ public class FloatService extends Service implements Monitor.Listener {
     private WindowManager wm;
     private WindowManager.LayoutParams lp;
     private LinearLayout view, rows;
+    private final View[][] rowViews = new View[TOP_N][]; // {row, dot, name, value}
+    private TextView emptyRow;
     private TextView temp, power, status;
     private Ui u;
     private SharedPreferences prefs;
@@ -194,6 +196,13 @@ public class FloatService extends Service implements Monitor.Listener {
 
         rows = u.col();
         view.addView(rows, Ui.lp(-1, -2, 0, u.dp(6), 0, 0));
+        // 行视图只创建一次，每次刷新只改文字和颜色，避免反复重排悬浮窗
+        for (int i = 0; i < TOP_N; i++) {
+            rowViews[i] = row();
+            rows.addView(rowViews[i][0], Ui.lp(-1, -2, 0, i > 0 ? u.dp(4) : 0, 0, 0));
+        }
+        emptyRow = u.text("没有明显的热源 👍", 12, u.dim, false);
+        rows.addView(emptyRow);
         rows.setVisibility(collapsed ? View.GONE : View.VISIBLE);
 
         lp = new WindowManager.LayoutParams(u.dp(216), WindowManager.LayoutParams.WRAP_CONTENT,
@@ -263,34 +272,46 @@ public class FloatService extends Service implements Monitor.Listener {
                     : "充电 " + Math.abs(bat.optLong("currentMa")) + " mA");
         }
         if (collapsed) return;
-        rows.removeAllViews();
         int n = 0;
         for (Entity e : r.heat) {
             if (n >= TOP_N) break;
             if (e.cpuAvg < 0.5 && e.level == Analyzer.OK) continue;
-            rows.addView(row(e), Ui.lp(-1, -2, 0, n > 0 ? u.dp(4) : 0, 0, 0));
+            bindRow(rowViews[n], e);
             n++;
         }
-        if (n == 0) rows.addView(u.text("没有明显的热源 👍", 12, u.dim, false));
+        for (int i = 0; i < TOP_N; i++) rowViews[i][0].setVisibility(i < n ? View.VISIBLE : View.GONE);
+        emptyRow.setVisibility(n == 0 ? View.VISIBLE : View.GONE);
     }
 
-    private View row(Entity e) {
+    private View[] row() {
         LinearLayout row = u.row();
         View dot = new View(this);
         GradientDrawable d = new GradientDrawable();
         d.setShape(GradientDrawable.OVAL);
-        d.setColor(e.level == Analyzer.OK ? Ui.typeColor(e) : u.levelColor(e.level));
         dot.setBackground(d);
         row.addView(dot, Ui.lp(u.dp(7), u.dp(7), 0, 0, u.dp(8), 0));
-        TextView name = u.text(u.label(e), 12, u.fg, false);
+        TextView name = u.text("", 12, u.fg, false);
         name.setSingleLine(true);
         name.setEllipsize(TextUtils.TruncateAt.END);
         row.addView(name, Ui.weight(1));
-        TextView val = u.text(Analyzer.fmt(e.cpuAvg) + "%", 12,
-                e.level == Analyzer.OK ? u.fg : u.levelColor(e.level), true);
+        TextView val = u.text("", 12, u.fg, true);
         val.setFontFeatureSettings("tnum");
         row.addView(val, Ui.lp(-2, -2, u.dp(8), 0, 0, 0));
-        return row;
+        return new View[]{row, dot, name, val};
+    }
+
+    private void bindRow(View[] v, Entity e) {
+        ((GradientDrawable) v[1].getBackground())
+                .setColor(e.level == Analyzer.OK ? Ui.typeColor(e) : u.levelColor(e.level));
+        ((TextView) v[2]).setText(u.label(e));
+        TextView val = (TextView) v[3];
+        val.setText(Analyzer.fmt(e.cpuAvg) + "%");
+        val.setTextColor(e.level == Analyzer.OK ? u.fg : u.levelColor(e.level));
+    }
+
+    @Override
+    public boolean wantsFast() {
+        return false;
     }
 
     @Override

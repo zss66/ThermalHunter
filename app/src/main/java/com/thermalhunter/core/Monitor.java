@@ -31,6 +31,11 @@ public final class Monitor {
 
         /** 连接 / 采集状态（主线程）。error=false 表示进行中的提示。 */
         void onStatus(String msg, boolean error);
+
+        /** 是否需要较快的刷新（主界面 3 秒；只有悬浮窗时放宽到 5 秒以省电）。 */
+        default boolean wantsFast() {
+            return true;
+        }
     }
 
     public interface Done {
@@ -40,7 +45,7 @@ public final class Monitor {
     // 工作模式：auto = 先试 root，失败再用 Shizuku；root = 仅 root；shizuku = 仅 Shizuku（ADB）
     public static final String[] MODES = {"auto", "root", "shizuku"};
 
-    private static final long INTERVAL_MS = 3000, RETRY_MS = 5000, IDLE_CLOSE_MS = 60_000;
+    private static final long INTERVAL_MS = 3000, SLOW_INTERVAL_MS = 5000, RETRY_MS = 5000, IDLE_CLOSE_MS = 60_000;
     private static Monitor instance;
 
     public static synchronized Monitor get(Context ctx) {
@@ -165,7 +170,12 @@ public final class Monitor {
         } else {
             status("采集失败：" + snap.optString("error"), true);
         }
-        if (!listeners.isEmpty()) bg.postDelayed(tickR, INTERVAL_MS);
+        if (!listeners.isEmpty()) bg.postDelayed(tickR, interval());
+    }
+
+    private long interval() {
+        for (Listener l : listeners) if (l.wantsFast()) return INTERVAL_MS;
+        return SLOW_INTERVAL_MS;
     }
 
     /** 按工作模式建立后台会话；成功返回 null，失败返回给用户看的说明。在 bg 线程执行。 */

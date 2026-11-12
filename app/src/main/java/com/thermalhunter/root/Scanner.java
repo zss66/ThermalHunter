@@ -30,8 +30,15 @@ final class Scanner {
     private static final class Static {
         long startTime;
         String cmdline, exe;
+        String cwd; // 懒加载，只有 native 进程需要
         int uid;
     }
+
+    // 内核唤醒源目录有数百项、每项要读 4 个文件，降低刷新频率
+    private static final long WAKEUP_REFRESH_MS = 30_000;
+    private JSONArray wakeupCache;
+    private long wakeupTime;
+    private final long[] statBuf = new long[6];
 
     private final int ncpu = Math.max(1, Runtime.getRuntime().availableProcessors());
     private final long pageKb;
@@ -204,16 +211,13 @@ final class Scanner {
             Proc p = new Proc();
             p.pid = pid;
             p.comm = stat.substring(lp + 1, rp);
-            String[] f = stat.substring(rp + 2).split(" ");
-            try {
-                p.ppid = Integer.parseInt(f[1]);
-                p.ticks = Long.parseLong(f[11]) + Long.parseLong(f[12]);
-                p.threads = Integer.parseInt(f[17]);
-                p.startTime = Long.parseLong(f[19]);
-                p.rssKb = Long.parseLong(f[21]) * pageKb;
-            } catch (Throwable e) {
-                continue;
-            }
+            long[] f = statBuf;
+            if (!parseStat(stat, rp + 2, f)) continue;
+            p.ppid = (int) f[0];
+            p.ticks = f[1] + f[2];
+            p.threads = (int) f[3];
+            p.startTime = f[4];
+            p.rssKb = f[5] * pageKb;
             alive.add(pid);
             long[] prev = prevTicks.get(pid);
             if (prev != null && prev[0] == p.startTime && dTotal > 0) {
@@ -253,7 +257,8 @@ final class Scanner {
                 p.uid = st.uid;
                 resolvePackage(p);
             }
-            p.adj = (int) Sys.readLong("/proc/" + pid + "/oom_score_adj", 0);
+            // 只有应用进程用到 adj（前台 / 后台 / 缓存判定），其余进程不读，省下数百次文件读取
+            p.adj = "app".equals(p.kind) ? (int) Sys.readLong("/proc/" + pid + "/oom_score_adj", 0) : 0;
             list.add(p);
         }
         prevTicks.keySet().retainAll(alive);
@@ -291,6 +296,55 @@ final class Scanner {
 
     // ------------------------------------------------------------------ KSU 归属
 
+    /** 进程工作目录，按进程生命周期缓存（几乎不会变）。 */
+    private String cwd(int pid) {
+        Static st = staticCache.get(pid);
+        if (st == null) return Sys.readlink("/proc/" + pid + "/cwd");
+        if (st.cwd == null) {
+            String c = Sys.readlink("/proc/" + pid + "/cwd");
+            st.cwd = c == null ? "" : c;
+        }
+        return st.cwd;
+    }
+
+    /**
+     * 解析 /proc/pid/stat 中 ')' 之后的字段（state 为第 0 个），不做 split 以减少临时对象。
+     * out: {ppid(1), utime(11), stime(12), threads(17), starttime(19), rss(21)}
+     */
+    private static boolean parseStat(String s, int from, long[] out) {
+        int field = 0, n = s.length(), i = from;
+        while (i < n && field <= 21) {
+            int j = i;
+            while (j < n && s.charAt(j) != ' ') j++;
+            int slot;
+            switch (field) {
+                case 1: slot = 0; break;
+                case 11: slot = 1; break;
+                case 12: slot = 2; break;
+                case 17: slot = 3; break;
+                case 19: slot = 4; break;
+                case 21: slot = 5; break;
+                default: slot = -1;
+            }
+            if (slot >= 0) {
+                int k = i;
+                boolean neg = k < j && s.charAt(k) == '-';
+                if (neg) k++;
+                if (k == j) return false;
+                long v = 0;
+                for (; k < j; k++) {
+                    char c = s.charAt(k);
+                    if (c < '0' || c > '9') return false;
+                    v = v * 10 + (c - '0');
+                }
+                out[slot] = neg ? -v : v;
+            }
+            field++;
+            i = j + 1;
+        }
+        return field > 21;
+    }
+
     private void attributeKsu(List<Proc> procs) {
         Map<String, String> overlay = KsuModules.overlay();
         Map<Integer, Proc> byPid = new HashMap<>();
@@ -301,10 +355,7 @@ final class Scanner {
             String id = moduleFromPath(p.exe, prefix);
             if (id == null) id = moduleFromPath(p.cmdline, prefix);
             if (id == null) id = overlay.get(p.exe);
-            if (id == null) {
-                String cwd = Sys.readlink("/proc/" + p.pid + "/cwd");
-                id = moduleFromPath(cwd, prefix);
-            }
+            if (id == null) id = moduleFromPath(cwd(p.pid), prefix);
             p.ksu = id;
         }
         // 继承父进程归属（模块 service.sh 拉起的 busybox/sleep/子进程）
@@ -607,6 +658,14 @@ final class Scanner {
     }
 
     private JSONArray kernelWakeups() throws Exception {
+        long now = SystemClock.elapsedRealtime();
+        if (wakeupCache != null && now - wakeupTime < WAKEUP_REFRESH_MS) return wakeupCache;
+        wakeupTime = now;
+        wakeupCache = scanWakeups();
+        return wakeupCache;
+    }
+
+    private JSONArray scanWakeups() throws Exception {
         JSONArray arr = new JSONArray();
         String base = "/sys/class/wakeup";
         List<Object[]> rows = new ArrayList<>();
