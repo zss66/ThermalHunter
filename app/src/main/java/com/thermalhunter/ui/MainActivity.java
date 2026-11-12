@@ -479,6 +479,11 @@ public class MainActivity extends Activity implements Monitor.Listener {
         }
     }
 
+    /** LSP 模块的作用域里是否有正在运行的普通应用（不含 system_server）。 */
+    private static boolean hasAppHost(Entity e) {
+        return e.scopeRunning > (e.injectsSystem && e.systemCpu >= 0 ? 1 : 0);
+    }
+
     /** 列表卡片的次要信息（主数值已在右侧大字显示）。 */
     private String metrics(Entity e) {
         if (tab == 3) {
@@ -555,6 +560,12 @@ public class MainActivity extends Activity implements Monitor.Listener {
             if (e.raw.optBoolean("postfs")) scripts.add("post-fs-data.sh");
             if (e.raw.optBoolean("sysprop")) scripts.add("system.prop");
             if (!scripts.isEmpty()) s.add(u.text("脚本：" + TextUtils.join("、", scripts), 13, u.dim, false));
+        }
+        if (e.type == Analyzer.LSP) {
+            s.add(u.note("LSPosed 模块的代码运行在宿主进程里，系统不会单独记录某个模块的 CPU。"
+                    + "上面的「宿主进程 CPU」是宿主的总占用；system_server 由所有注入系统框架的模块共用。"
+                    + "要确认某个模块的影响，可禁用后重启手机，对比前后的温度和功耗。", u.dim),
+                    Ui.lp(-1, -2, 0, u.dp(12), 0, 0));
         }
         if (e.type == Analyzer.LSP && !e.scopes.isEmpty()) {
             s.section("作用域（" + e.scopes.size() + "）");
@@ -639,9 +650,9 @@ public class MainActivity extends Activity implements Monitor.Listener {
             return l;
         }
         if (e.type == Analyzer.LSP) {
-            l.add(new Object[]{"作用域 CPU", Analyzer.fmt(e.scopeCpu) + "%", lc});
-            l.add(new Object[]{"运行中的作用域", String.valueOf(e.scopeRunning), u.fg});
-            l.add(new Object[]{"自身 CPU", e.pids.isEmpty() ? "--" : Analyzer.fmt(e.cpuAvg) + "%", u.fg});
+            l.add(new Object[]{"宿主进程 CPU", hasAppHost(e) ? Analyzer.fmt(e.scopeCpu) + "%" : "--", u.fg});
+            l.add(new Object[]{"system_server", e.systemCpu >= 0 ? Analyzer.fmt(e.systemCpu) + "%" : "--", u.dim});
+            l.add(new Object[]{"模块应用自身", e.pids.isEmpty() ? "未运行" : Analyzer.fmt(e.cpuAvg) + "%", u.fg});
             return l;
         }
         l.add(new Object[]{"CPU（15秒均值）", Analyzer.fmt(e.cpuAvg) + "%", lc});
@@ -1036,16 +1047,28 @@ public class MainActivity extends Activity implements Monitor.Listener {
                 h.caption.setText("持锁");
                 frac = Math.max(0, e.wlFrac);
             } else if (e.type == Analyzer.LSP) {
-                h.value.setText(Analyzer.fmt(e.scopeCpu) + "%");
-                h.caption.setText("作用域 CPU");
-                frac = e.scopeCpu / 100;
+                // 模块自身在宿主进程里的开销无法单独统计；显示宿主进程的占用并注明
+                if (hasAppHost(e)) {
+                    h.value.setText(Analyzer.fmt(e.scopeCpu) + "%");
+                    h.caption.setText("宿主进程 CPU");
+                    frac = e.scopeCpu / 100;
+                } else if (e.injectsSystem && e.systemCpu >= 0) {
+                    h.value.setText(Analyzer.fmt(e.systemCpu) + "%");
+                    h.caption.setText("system_server·共用");
+                    frac = 0;
+                } else {
+                    h.value.setText("--");
+                    h.caption.setText("宿主未运行");
+                    frac = 0;
+                }
             } else {
                 h.value.setText(Analyzer.fmt(e.cpuAvg) + "%");
                 h.caption.setText("CPU");
                 frac = e.cpuAvg / 100;
             }
             int lc = u.levelColor(e.level);
-            h.value.setTextColor(e.level == Analyzer.OK ? u.fg : lc);
+            boolean sharedOnly = e.type == Analyzer.LSP && !hasAppHost(e);
+            h.value.setTextColor(sharedOnly ? u.dim : e.level == Analyzer.OK ? u.fg : lc);
             h.bar.set((float) Math.min(1, frac), lc);
 
             StringBuilder rs = new StringBuilder();

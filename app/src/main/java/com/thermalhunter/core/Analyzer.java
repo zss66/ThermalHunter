@@ -57,8 +57,12 @@ public final class Analyzer {
         public final List<String> tags = new ArrayList<>();
         public JSONObject raw;
         public final List<String> scopes = new ArrayList<>();
+        /** 作用域内普通应用（宿主）进程的 CPU 合计，不含 system_server；这是宿主的总占用，不是模块自身的开销。 */
         public double scopeCpu;
         public int scopeRunning;
+        /** 注入系统框架时 system_server 的 CPU；所有这类模块共用同一个进程，无法拆分到单个模块。-1 表示不适用。 */
+        public double systemCpu = -1;
+        public boolean injectsSystem;
     }
 
     public static final class Result {
@@ -351,9 +355,10 @@ public final class Analyzer {
                         String sp = so.optString("pkg");
                         e.scopes.add(sp + (so.optInt("user") != 0 ? " (用户" + so.optInt("user") + ")" : ""));
                         if ("system".equals(sp) || "android".equals(sp)) {
+                            // system_server 由所有注入系统框架的模块共享，不能把它的 CPU 算到某一个模块头上
                             injectsSystem = true;
                             if (systemServer != null) {
-                                e.scopeCpu += systemServer.cpuAvg;
+                                e.systemCpu = systemServer.cpuAvg;
                                 e.scopeRunning++;
                             }
                             continue;
@@ -366,15 +371,18 @@ public final class Analyzer {
                             if (se.level == BAD) badScoped.add(sp);
                         }
                     }
+                    e.injectsSystem = injectsSystem;
                     e.sub = "作用域 " + e.scopes.size() + " 个，运行中 " + e.scopeRunning + " 个";
                     if (!e.enabled) e.tags.add("已禁用");
                     if (injectsSystem) e.tags.add("注入系统框架");
                     if (e.scopes.size() >= 30) e.tags.add("作用域过大");
                     if (e.enabled && !e.isSelf) {
                         if (e.cpuAvg >= CPU_LSP_SELF && e.minAdj > 0) bad(e, "模块自身后台进程 CPU " + fmt(e.cpuAvg) + "%");
-                        if (!badScoped.isEmpty()) warn(e, "作用域内异常应用: " + join(badScoped) + "（可能被该模块的 hook 拖累）");
+                        if (!badScoped.isEmpty()) warn(e, "作用域内异常应用: " + join(badScoped) + "（宿主本身也可能就是热源，可禁用此模块对比）");
                         if (injectsSystem && systemServer != null && systemServer.cpuAvg >= 15) {
-                            warn(e, "system_server CPU " + fmt(systemServer.cpuAvg) + "%，注入系统框架的模块是嫌疑对象");
+                            // 只作提示，不标记可疑：无法确定是哪一个模块造成的
+                            e.warnings.add("system_server CPU " + fmt(systemServer.cpuAvg) + "%，由所有注入系统框架的模块共用，"
+                                    + "无法区分各模块的实际占用；如怀疑可逐个禁用后重启对比");
                         }
                     }
                     e.heat = e.scopeCpu * 0.3 + e.cpuAvg + (e.level == BAD ? 1000 : e.level == WARN ? 100 : 0) + (e.enabled ? 1 : 0);
