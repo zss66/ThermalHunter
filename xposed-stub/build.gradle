@@ -1,0 +1,13 @@
+// 仅编译期使用的 Xposed API 桩（运行时由 LSPosed 提供），不会打包进 APK
+plugins { id 'java-library' }
+java { sourceCompatibility = JavaVersion.VERSION_1_8; targetCompatibility = JavaVersion.VERSION_1_8 }
+
+def sdkDir = {
+    def p = new Properties()
+    def f = rootProject.file('local.properties')
+    if (f.exists()) f.withInputStream { p.load(it) }
+    p.getProperty('sdk.dir') ?: System.getenv('ANDROID_HOME') ?: System.getenv('ANDROID_SDK_ROOT')
+}()
+dependencies {
+    compileOnly files("${sdkDir}/platforms/android-35/android.jar")
+}

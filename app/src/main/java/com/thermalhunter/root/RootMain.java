@@ -1,0 +1,106 @@
+package com.thermalhunter.root;
+
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+
+/**
+ * root 端常驻进程入口，由 App 通过以下方式启动：
+ *   su -c 'CLASSPATH=<apk> exec app_process /system/bin com.thermalhunter.root.RootMain'
+ * 协议：stdin 每行一条命令，stdout 每行一个以 "@@" 开头的 JSON 响应。
+ * stdin 关闭（App 退出）时进程自动结束，不会残留后台耗电。
+ */
+public final class RootMain {
+
+    public static void main(String[] args) {
+        PrintStream out = new PrintStream(new java.io.FileOutputStream(java.io.FileDescriptor.out), false);
+        // 防止框架代码向 stdout 打印杂讯污染协议
+        System.setOut(new PrintStream(new java.io.OutputStream() {
+            @Override
+            public void write(int b) {
+            }
+        }));
+        Scanner scanner = new Scanner();
+        Actions actions = new Actions(scanner);
+        out.println("@@READY");
+        out.flush();
+        try (BufferedReader in = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = in.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty()) continue;
+                JSONObject resp;
+                try {
+                    resp = handle(line.split(" "), scanner, actions);
+                } catch (Throwable e) {
+                    resp = new JSONObject();
+                    try {
+                        resp.put("ok", false);
+                        resp.put("error", String.valueOf(e));
+                    } catch (Exception ignored) {
+                    }
+                }
+                if (resp == null) break;
+                out.println("@@" + resp);
+                out.flush();
+            }
+        } catch (Throwable ignored) {
+        }
+        System.exit(0);
+    }
+
+    private static int intArg(String[] a, int i, int def) {
+        try {
+            return a.length > i ? Integer.parseInt(a[i]) : def;
+        } catch (NumberFormatException e) {
+            return def;
+        }
+    }
+
+    private static String strArg(String[] a, int i) {
+        return a.length > i ? a[i] : "";
+    }
+
+    private static JSONObject handle(String[] a, Scanner s, Actions act) throws Exception {
+        switch (a[0]) {
+            case "SNAPSHOT":
+                return s.snapshot();
+            case "KILL":
+                return act.kill(intArg(a, 1, -1), strArg(a, 2));
+            case "FORCESTOP":
+                return act.forceStop(strArg(a, 1), intArg(a, 2, 0));
+            case "APP_DISABLE":
+                return act.setAppEnabled(strArg(a, 1), intArg(a, 2, 0), false);
+            case "APP_ENABLE":
+                return act.setAppEnabled(strArg(a, 1), intArg(a, 2, 0), true);
+            case "KSU_KILL":
+                return act.killKsuProcs(strArg(a, 1));
+            case "KSU_DISABLE":
+                return act.setKsuEnabled(strArg(a, 1), false);
+            case "KSU_ENABLE":
+                return act.setKsuEnabled(strArg(a, 1), true);
+            case "LSP_DISABLE":
+                return act.setLspEnabled(strArg(a, 1), false);
+            case "LSP_ENABLE":
+                return act.setLspEnabled(strArg(a, 1), true);
+            case "REBOOT":
+                return act.reboot();
+            case "PING": {
+                JSONObject o = new JSONObject();
+                o.put("ok", true);
+                return o;
+            }
+            case "EXIT":
+                return null;
+            default: {
+                JSONObject o = new JSONObject();
+                o.put("ok", false);
+                o.put("error", "unknown command " + a[0]);
+                return o;
+            }
+        }
+    }
+}

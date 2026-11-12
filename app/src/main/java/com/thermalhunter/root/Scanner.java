@@ -1,0 +1,593 @@
+package com.thermalhunter.root;
+
+import android.os.SystemClock;
+import android.system.Os;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/** 采集一次系统快照。CPU 占用按两次快照之间的差值计算（单核百分比，与 top 一致）。 */
+final class Scanner {
+
+    static final class Proc {
+        int pid, ppid, uid, threads;
+        long startTime, ticks, rssKb;
+        String comm, cmdline, exe, pkg, kind, ksu;
+        int adj;
+        double cpu;
+    }
+
+    /** 进程静态信息缓存（pid+starttime 作为键，避免每次 readlink）。 */
+    private static final class Static {
+        long startTime;
+        String cmdline, exe;
+        int uid;
+    }
+
+    private final int ncpu = Math.max(1, Runtime.getRuntime().availableProcessors());
+    private final long pageKb;
+    private final Map<Integer, Static> staticCache = new HashMap<>();
+    private final Map<Integer, long[]> prevTicks = new HashMap<>(); // pid -> {startTime, ticks}
+    private long prevTotal = -1, prevIdle = -1;
+    private final Map<String, long[]> prevWakeup = new HashMap<>(); // name -> {totalMs, count}
+
+    private Map<Integer, List<String>> appIdToPkgs = new HashMap<>();
+    private Set<String> allPkgs = new HashSet<>();
+    private long pkgListTime;
+
+    final List<Proc> lastProcs = new ArrayList<>();
+    private JSONObject device;
+
+    Scanner() {
+        long ps = 4096;
+        try {
+            ps = Os.sysconf(android.system.OsConstants._SC_PAGESIZE);
+        } catch (Throwable ignored) {
+        }
+        pageKb = ps / 1024;
+    }
+
+    // ------------------------------------------------------------------ packages
+
+    private void loadPackages() {
+        long now = SystemClock.elapsedRealtime();
+        if (now - pkgListTime < 60_000 && !allPkgs.isEmpty()) return;
+        pkgListTime = now;
+        String s = Sys.readAll("/data/system/packages.list", 4 << 20);
+        if (s == null) return;
+        Map<Integer, List<String>> map = new HashMap<>();
+        Set<String> all = new HashSet<>();
+        for (String line : s.split("\n")) {
+            String[] f = line.split(" ");
+            if (f.length < 2) continue;
+            try {
+                int appId = Integer.parseInt(f[1]);
+                List<String> l = map.get(appId);
+                if (l == null) map.put(appId, l = new ArrayList<>());
+                l.add(f[0]);
+                all.add(f[0]);
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        appIdToPkgs = map;
+        allPkgs = all;
+    }
+
+    // ------------------------------------------------------------------ snapshot
+
+    JSONObject snapshot() throws Exception {
+        loadPackages();
+        JSONObject out = new JSONObject();
+        out.put("ok", true);
+        out.put("t", SystemClock.elapsedRealtime());
+        out.put("ncpu", ncpu);
+        out.put("device", device());
+
+        // 总 CPU
+        long[] cpu = readCpuTotal();
+        long dTotal = 0, dIdle = 0;
+        if (cpu != null) {
+            if (prevTotal >= 0) {
+                dTotal = cpu[0] - prevTotal;
+                dIdle = cpu[1] - prevIdle;
+            }
+            prevTotal = cpu[0];
+            prevIdle = cpu[1];
+        }
+        double totalUsage = dTotal > 0 ? (dTotal - dIdle) * 100.0 / dTotal : 0;
+
+        List<Proc> procs = readProcs(dTotal);
+        attributeKsu(procs);
+        currentProcsForAgg = procs;
+
+        JSONObject cpuObj = new JSONObject();
+        cpuObj.put("usage", round1(totalUsage));
+        cpuObj.put("policies", cpuPolicies());
+        out.put("cpu", cpuObj);
+        out.put("gpu", gpu());
+        out.put("battery", battery());
+        out.put("thermal", thermal());
+        out.put("procs", procsJson(procs));
+        out.put("rootImpl", KsuModules.rootImpl());
+        out.put("ksu", ksuJson());
+        out.put("lsp", lspJson());
+        out.put("hook", hookJson());
+        out.put("wakeups", kernelWakeups());
+        out.put("selfPid", Os.getpid());
+        synchronized (lastProcs) {
+            lastProcs.clear();
+            lastProcs.addAll(procs);
+        }
+        return out;
+    }
+
+    private JSONObject device() throws Exception {
+        if (device != null) return device;
+        JSONObject d = new JSONObject();
+        d.put("model", Sys.prop("ro.product.marketname").isEmpty() ? Sys.prop("ro.product.model") : Sys.prop("ro.product.marketname"));
+        d.put("modelId", Sys.prop("ro.product.model"));
+        d.put("brand", Sys.prop("ro.product.brand"));
+        d.put("soc", firstNonEmpty(Sys.prop("ro.soc.model"), Sys.prop("ro.board.platform"), Sys.prop("ro.hardware")));
+        d.put("android", Sys.prop("ro.build.version.release"));
+        d.put("rom", firstNonEmpty(Sys.prop("ro.vivo.os.build.display.id"), Sys.prop("ro.build.display.id")));
+        String kv = Sys.readTrim("/proc/sys/kernel/osrelease");
+        d.put("kernel", kv == null ? "" : kv);
+        device = d;
+        return d;
+    }
+
+    private static String firstNonEmpty(String... s) {
+        for (String x : s) if (x != null && !x.isEmpty()) return x;
+        return "";
+    }
+
+    private static long[] readCpuTotal() {
+        String s = Sys.read("/proc/stat");
+        if (s == null) return null;
+        int nl = s.indexOf('\n');
+        String[] f = s.substring(0, nl > 0 ? nl : s.length()).trim().split("\\s+");
+        long total = 0, idle = 0;
+        for (int i = 1; i < f.length && i <= 8; i++) {
+            long v = Long.parseLong(f[i]);
+            total += v;
+            if (i == 4 || i == 5) idle += v; // idle + iowait
+        }
+        return new long[]{total, idle};
+    }
+
+    private List<Proc> readProcs(long dTotal) {
+        List<Proc> list = new ArrayList<>();
+        Set<Integer> alive = new HashSet<>();
+        for (String name : Sys.list("/proc")) {
+            char c0 = name.charAt(0);
+            if (c0 < '0' || c0 > '9') continue;
+            int pid;
+            try {
+                pid = Integer.parseInt(name);
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            String stat = Sys.read("/proc/" + pid + "/stat");
+            if (stat == null) continue;
+            int lp = stat.indexOf('('), rp = stat.lastIndexOf(')');
+            if (lp < 0 || rp < 0) continue;
+            Proc p = new Proc();
+            p.pid = pid;
+            p.comm = stat.substring(lp + 1, rp);
+            String[] f = stat.substring(rp + 2).split(" ");
+            try {
+                p.ppid = Integer.parseInt(f[1]);
+                p.ticks = Long.parseLong(f[11]) + Long.parseLong(f[12]);
+                p.threads = Integer.parseInt(f[17]);
+                p.startTime = Long.parseLong(f[19]);
+                p.rssKb = Long.parseLong(f[21]) * pageKb;
+            } catch (Throwable e) {
+                continue;
+            }
+            alive.add(pid);
+            long[] prev = prevTicks.get(pid);
+            if (prev != null && prev[0] == p.startTime && dTotal > 0) {
+                // 单核百分比：进程 tick / (总 tick / 核数)
+                p.cpu = (p.ticks - prev[1]) * 100.0 * ncpu / dTotal;
+            }
+            prevTicks.put(pid, new long[]{p.startTime, p.ticks});
+
+            boolean kernel = pid == 2 || p.ppid == 2;
+            if (kernel) {
+                p.kind = "kernel";
+                p.cmdline = p.comm;
+                p.exe = "";
+                p.pkg = "";
+                p.uid = 0;
+            } else {
+                Static st = staticCache.get(pid);
+                if (st == null || st.startTime != p.startTime) {
+                    st = new Static();
+                    st.startTime = p.startTime;
+                    String cl = Sys.read("/proc/" + pid + "/cmdline");
+                    st.cmdline = cl == null ? "" : cl.replace('\0', ' ').trim();
+                    String exe = Sys.readlink("/proc/" + pid + "/exe");
+                    st.exe = exe == null ? "" : exe;
+                    try {
+                        st.uid = Os.stat("/proc/" + pid).st_uid;
+                    } catch (Throwable e) {
+                        st.uid = -1;
+                    }
+                    // 应用进程 cmdline 刚 fork 时可能还是 zygote，先不缓存
+                    if (!st.cmdline.startsWith("zygote") && !st.cmdline.startsWith("<pre-initialized>")) {
+                        staticCache.put(pid, st);
+                    }
+                }
+                p.cmdline = st.cmdline.isEmpty() ? p.comm : st.cmdline;
+                p.exe = st.exe;
+                p.uid = st.uid;
+                resolvePackage(p);
+            }
+            p.adj = (int) Sys.readLong("/proc/" + pid + "/oom_score_adj", 0);
+            list.add(p);
+        }
+        prevTicks.keySet().retainAll(alive);
+        staticCache.keySet().retainAll(alive);
+        return list;
+    }
+
+    private void resolvePackage(Proc p) {
+        String first = p.cmdline;
+        int sp = first.indexOf(' ');
+        if (sp > 0) first = first.substring(0, sp);
+        String base = first;
+        int colon = base.indexOf(':');
+        if (colon > 0) base = base.substring(0, colon);
+        int appId = p.uid % 100000;
+        if (allPkgs.contains(base)) {
+            p.pkg = base;
+            p.kind = "app";
+            return;
+        }
+        if (appId >= 10000 && appId < 20000) {
+            List<String> l = appIdToPkgs.get(appId);
+            p.pkg = (l == null || l.isEmpty()) ? "" : l.get(0);
+            p.kind = "app";
+            return;
+        }
+        if (appId >= 90000 && appId < 100000) { // isolated
+            p.pkg = allPkgs.contains(base) ? base : "";
+            p.kind = "app";
+            return;
+        }
+        p.pkg = "";
+        p.kind = "native";
+    }
+
+    // ------------------------------------------------------------------ KSU 归属
+
+    private void attributeKsu(List<Proc> procs) {
+        Map<String, String> overlay = KsuModules.overlay();
+        Map<Integer, Proc> byPid = new HashMap<>();
+        for (Proc p : procs) byPid.put(p.pid, p);
+        String prefix = KsuModules.MODULES_DIR + "/";
+        for (Proc p : procs) {
+            if (!"native".equals(p.kind)) continue;
+            String id = moduleFromPath(p.exe, prefix);
+            if (id == null) id = moduleFromPath(p.cmdline, prefix);
+            if (id == null) id = overlay.get(p.exe);
+            if (id == null) {
+                String cwd = Sys.readlink("/proc/" + p.pid + "/cwd");
+                id = moduleFromPath(cwd, prefix);
+            }
+            p.ksu = id;
+        }
+        // 继承父进程归属（模块 service.sh 拉起的 busybox/sleep/子进程）
+        for (Proc p : procs) {
+            if (!"native".equals(p.kind) || p.ksu != null) continue;
+            Proc cur = byPid.get(p.ppid);
+            int guard = 0;
+            while (cur != null && guard++ < 16 && cur.pid > 1) {
+                if (cur.ksu != null) {
+                    p.ksu = cur.ksu;
+                    break;
+                }
+                cur = byPid.get(cur.ppid);
+            }
+        }
+    }
+
+    private static String moduleFromPath(String s, String prefix) {
+        if (s == null) return null;
+        int i = s.indexOf(prefix);
+        if (i < 0) {
+            // KernelSU 也会把模块挂载到 /data/adb/modules_update 或 /debug_ramdisk 等，这里只处理常见路径
+            return null;
+        }
+        int start = i + prefix.length();
+        int end = start;
+        while (end < s.length() && s.charAt(end) != '/' && s.charAt(end) != ' ') end++;
+        return end > start ? s.substring(start, end) : null;
+    }
+
+    // ------------------------------------------------------------------ JSON 输出
+
+    private JSONArray procsJson(List<Proc> procs) throws Exception {
+        // 只输出有意义的进程，控制数据量
+        List<Proc> sorted = new ArrayList<>(procs);
+        Collections.sort(sorted, (a, b) -> Long.compare(b.rssKb, a.rssKb));
+        Set<Integer> topMem = new HashSet<>();
+        for (int i = 0; i < Math.min(40, sorted.size()); i++) topMem.add(sorted.get(i).pid);
+        Set<String> lspPkgs = new HashSet<>();
+        LspModules.Result lr = LspModules.get();
+        for (LspModules.Module m : lr.modules) lspPkgs.add(m.pkg);
+
+        JSONArray arr = new JSONArray();
+        for (Proc p : procs) {
+            boolean keep = p.cpu >= 0.2 || p.ksu != null || topMem.contains(p.pid)
+                    || (p.pkg != null && lspPkgs.contains(p.pkg)) || "system_server".equals(p.comm);
+            if ("kernel".equals(p.kind)) keep = p.cpu >= 0.5;
+            if (!keep) continue;
+            JSONObject o = new JSONObject();
+            o.put("pid", p.pid);
+            o.put("ppid", p.ppid);
+            o.put("uid", p.uid);
+            o.put("name", shortName(p));
+            o.put("cmd", p.cmdline.length() > 200 ? p.cmdline.substring(0, 200) : p.cmdline);
+            o.put("exe", p.exe);
+            o.put("pkg", p.pkg);
+            o.put("kind", p.kind);
+            o.put("cpu", round1(p.cpu));
+            o.put("rss", p.rssKb);
+            o.put("adj", p.adj);
+            o.put("thr", p.threads);
+            if (p.ksu != null) o.put("ksu", p.ksu);
+            arr.put(o);
+        }
+        return arr;
+    }
+
+    private static String shortName(Proc p) {
+        if ("kernel".equals(p.kind)) return p.comm;
+        String c = p.cmdline;
+        int sp = c.indexOf(' ');
+        String first = sp > 0 ? c.substring(0, sp) : c;
+        if ("app".equals(p.kind)) return first;
+        // 脚本解释器：显示脚本名
+        if ((first.endsWith("/sh") || first.equals("sh") || first.endsWith("busybox")) && sp > 0) return c.length() > 80 ? c.substring(0, 80) : c;
+        int slash = first.lastIndexOf('/');
+        return slash >= 0 ? first.substring(slash + 1) : first;
+    }
+
+    private JSONArray ksuJson() throws Exception {
+        Map<String, double[]> agg = new HashMap<>(); // id -> {cpu, count, rss}
+        Map<String, JSONArray> pids = new HashMap<>();
+        for (Proc p : currentProcsForAgg) {
+            if (p.ksu == null) continue;
+            double[] a = agg.get(p.ksu);
+            if (a == null) agg.put(p.ksu, a = new double[3]);
+            a[0] += p.cpu;
+            a[1] += 1;
+            a[2] += p.rssKb;
+            JSONArray l = pids.get(p.ksu);
+            if (l == null) pids.put(p.ksu, l = new JSONArray());
+            l.put(p.pid);
+        }
+        JSONArray arr = new JSONArray();
+        for (KsuModules.Module m : KsuModules.get()) {
+            JSONObject o = new JSONObject();
+            o.put("id", m.id);
+            o.put("name", m.name.isEmpty() ? m.id : m.name);
+            o.put("version", m.version);
+            o.put("author", m.author);
+            o.put("desc", m.description);
+            o.put("enabled", !m.disabled);
+            o.put("remove", m.remove);
+            o.put("service", m.hasService);
+            o.put("postfs", m.hasPostFs);
+            o.put("zygisk", m.hasZygisk);
+            o.put("webroot", m.hasWebroot);
+            o.put("sysprop", m.hasSystemProp);
+            o.put("tags", new JSONArray(m.tags));
+            double[] a = agg.get(m.id);
+            o.put("cpu", a == null ? 0 : round1(a[0]));
+            o.put("nproc", a == null ? 0 : (int) a[1]);
+            o.put("rss", a == null ? 0 : (long) a[2]);
+            o.put("pids", pids.containsKey(m.id) ? pids.get(m.id) : new JSONArray());
+            arr.put(o);
+        }
+        return arr;
+    }
+
+    /** 本轮快照的进程列表，供 ksuJson 聚合。 */
+    private List<Proc> currentProcsForAgg = Collections.emptyList();
+
+    private JSONObject lspJson() throws Exception {
+        LspModules.Result r = LspModules.get();
+        JSONObject o = new JSONObject();
+        o.put("available", r.available);
+        if (r.error != null) o.put("error", r.error);
+        JSONArray arr = new JSONArray();
+        for (LspModules.Module m : r.modules) {
+            JSONObject mo = new JSONObject();
+            mo.put("pkg", m.pkg);
+            mo.put("enabled", m.enabled);
+            JSONArray sc = new JSONArray();
+            for (LspModules.Scope s : m.scopes) {
+                JSONObject so = new JSONObject();
+                so.put("pkg", s.pkg);
+                so.put("user", s.user);
+                sc.put(so);
+            }
+            mo.put("scope", sc);
+            arr.put(mo);
+        }
+        o.put("modules", arr);
+        return o;
+    }
+
+    private JSONObject hookJson() throws Exception {
+        JSONObject o = new JSONObject();
+        File f = new File("/data/system/thermalhunter/stats.json");
+        if (!f.exists()) {
+            o.put("present", false);
+            return o;
+        }
+        String s = Sys.readAll(f.getAbsolutePath(), 2 << 20);
+        if (s == null) {
+            o.put("present", false);
+            return o;
+        }
+        JSONObject j = new JSONObject(s);
+        o.put("present", true);
+        long now = SystemClock.elapsedRealtime();
+        o.put("ageSec", (now - j.optLong("elapsed")) / 1000);
+        o.put("elapsed", j.optLong("elapsed"));
+        o.put("since", j.optLong("since"));
+        o.put("pkgs", j.optJSONObject("pkgs"));
+        return o;
+    }
+
+    // ------------------------------------------------------------------ 硬件状态
+
+    private JSONArray cpuPolicies() throws Exception {
+        JSONArray arr = new JSONArray();
+        String base = "/sys/devices/system/cpu/cpufreq";
+        String[] names = Sys.list(base);
+        java.util.Arrays.sort(names);
+        for (String n : names) {
+            if (!n.startsWith("policy")) continue;
+            String d = base + "/" + n;
+            JSONObject o = new JSONObject();
+            o.put("name", n);
+            o.put("cpus", String.valueOf(Sys.readTrim(d + "/related_cpus")));
+            o.put("cur", Sys.readLong(d + "/scaling_cur_freq", 0) / 1000);
+            o.put("max", Sys.readLong(d + "/cpuinfo_max_freq", 0) / 1000);
+            o.put("limit", Sys.readLong(d + "/scaling_max_freq", 0) / 1000);
+            o.put("gov", String.valueOf(Sys.readTrim(d + "/scaling_governor")));
+            arr.put(o);
+        }
+        return arr;
+    }
+
+    private JSONObject gpu() throws Exception {
+        JSONObject o = new JSONObject();
+        // 联发科 (天玑) GED
+        String util = Sys.readTrim("/sys/kernel/ged/hal/gpu_utilization");
+        if (util != null) o.put("util", Sys.firstNumber(util, -1));
+        String freq = Sys.readTrim("/sys/kernel/ged/hal/current_freqency");
+        if (freq != null) {
+            long best = 0;
+            for (String t : freq.split("\\s+")) {
+                try {
+                    best = Math.max(best, Long.parseLong(t));
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            if (best > 0) o.put("mhz", best > 100000 ? best / 1000 : best);
+        }
+        // 通用 devfreq (Mali)
+        if (!o.has("mhz")) {
+            for (String n : Sys.list("/sys/class/devfreq")) {
+                String low = n.toLowerCase();
+                if (low.contains("mali") || low.contains("gpu") || low.contains("kgsl")) {
+                    long hz = Sys.readLong("/sys/class/devfreq/" + n + "/cur_freq", 0);
+                    if (hz > 0) o.put("mhz", hz / 1_000_000);
+                    break;
+                }
+            }
+        }
+        // 高通
+        if (!o.has("util")) {
+            String b = Sys.readTrim("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage");
+            if (b != null) o.put("util", Sys.firstNumber(b, -1));
+        }
+        return o;
+    }
+
+    private JSONObject battery() throws Exception {
+        JSONObject o = new JSONObject();
+        String d = "/sys/class/power_supply/battery";
+        o.put("level", Sys.readLong(d + "/capacity", -1));
+        String st = Sys.readTrim(d + "/status");
+        o.put("status", st == null ? "" : st);
+        long cur = Sys.readLong(d + "/current_now", 0);
+        long volt = Sys.readLong(d + "/voltage_now", 0);
+        // 单位自适应：µA/mA、µV/mV
+        double ma = Math.abs(cur) > 20000 ? cur / 1000.0 : cur;
+        double mv = volt > 100000 ? volt / 1000.0 : volt;
+        o.put("currentMa", Math.round(ma));
+        o.put("voltageMv", Math.round(mv));
+        o.put("powerMw", Math.round(Math.abs(ma) * mv / 1000.0));
+        long temp = Sys.readLong(d + "/temp", Long.MIN_VALUE);
+        if (temp != Long.MIN_VALUE) o.put("tempC", temp / 10.0);
+        return o;
+    }
+
+    private JSONArray thermal() throws Exception {
+        JSONArray arr = new JSONArray();
+        String base = "/sys/class/thermal";
+        for (String n : Sys.list(base)) {
+            if (!n.startsWith("thermal_zone")) continue;
+            String type = Sys.readTrim(base + "/" + n + "/type");
+            long t = Sys.readLong(base + "/" + n + "/temp", Long.MIN_VALUE);
+            if (type == null || t == Long.MIN_VALUE) continue;
+            double c = Math.abs(t) > 1000 ? t / 1000.0 : t;
+            if (c < -30 || c > 150) continue;
+            JSONObject o = new JSONObject();
+            o.put("type", type);
+            o.put("temp", round1(c));
+            arr.put(o);
+        }
+        return arr;
+    }
+
+    private JSONArray kernelWakeups() throws Exception {
+        JSONArray arr = new JSONArray();
+        String base = "/sys/class/wakeup";
+        List<Object[]> rows = new ArrayList<>();
+        for (String n : Sys.list(base)) {
+            String d = base + "/" + n;
+            String name = Sys.readTrim(d + "/name");
+            if (name == null) continue;
+            long total = Sys.readLong(d + "/total_time_ms", 0);
+            long count = Sys.readLong(d + "/active_count", 0);
+            long active = Sys.readLong(d + "/active_time_ms", 0);
+            long[] prev = prevWakeup.get(name);
+            long dt = prev == null ? 0 : total - prev[0];
+            long dc = prev == null ? 0 : count - prev[1];
+            prevWakeup.put(name, new long[]{total, count});
+            if (dt > 0 || active > 0) rows.add(new Object[]{name, dt + active, dc, active, total});
+        }
+        Collections.sort(rows, (a, b) -> Long.compare((long) b[1], (long) a[1]));
+        for (int i = 0; i < Math.min(15, rows.size()); i++) {
+            Object[] r = rows.get(i);
+            JSONObject o = new JSONObject();
+            o.put("name", r[0]);
+            o.put("dMs", r[1]);
+            o.put("dCount", r[2]);
+            o.put("activeMs", r[3]);
+            o.put("totalMs", r[4]);
+            arr.put(o);
+        }
+        // 用户态通过 /sys/power/wake_lock 持有的内核唤醒锁（常见于模块脚本）
+        String wl = Sys.readTrim("/sys/power/wake_lock");
+        if (wl != null && !wl.isEmpty()) {
+            for (String n : wl.split("\\s+")) {
+                JSONObject o = new JSONObject();
+                o.put("name", n);
+                o.put("user", true);
+                arr.put(o);
+            }
+        }
+        return arr;
+    }
+
+    static double round1(double v) {
+        return Math.round(v * 10) / 10.0;
+    }
+}
