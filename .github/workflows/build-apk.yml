@@ -30,7 +30,10 @@ jobs:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            CLEAN=$(printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]')
+            echo "KEYSTORE_BASE64 length after removing whitespace: ${#CLEAN} (expected 5684)"
+            printf '%s' "$CLEAN" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "Decoded keystore size: $(stat -c %s "$RUNNER_TEMP/release.jks") bytes (expected 4262)"
             echo "SIGNING_STORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
           elif [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "::error::KEYSTORE_BASE64 secret is missing"; exit 1
