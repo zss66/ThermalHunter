@@ -5,11 +5,18 @@ import android.app.AlertDialog;
 import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.Context;
+import android.content.res.ColorStateList;
 import android.content.res.Configuration;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -22,6 +29,7 @@ import android.view.ViewGroup;
 import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
@@ -30,6 +38,7 @@ import android.widget.RadioGroup;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.thermalhunter.R;
 import com.thermalhunter.core.Analyzer;
 import com.thermalhunter.core.Analyzer.Entity;
 import com.thermalhunter.core.ModuleStatus;
@@ -73,7 +82,16 @@ public class MainActivity extends Activity {
 
     private SharedPreferences prefs;
     private Palette c;
-    private TextView headDevice, headTemp, headPower, headLoad, banner;
+    private TextView headDevice, modeChip, banner, emptyText, loadSummary;
+    private TextView heroLabel, heroTemp, heroTempSub, heroPowerLabel, heroPower, heroPowerSub;
+    private LinearLayout hero, clusterRow;
+    private final int[] tabCounts = new int[TABS.length];
+
+    // 温度卡片渐变：无数据 / 正常 / 偏热 / 过热
+    private static final int[] GRAD_NONE = {0xFF64748B, 0xFF94A3B8};
+    private static final int[] GRAD_COOL = {0xFF2563EB, 0xFF06B6D4};
+    private static final int[] GRAD_WARM = {0xFFF59E0B, 0xFFF97316};
+    private static final int[] GRAD_HOT = {0xFFEF4444, 0xFFDB2777};
     private final TextView[] tabViews = new TextView[TABS.length];
     private ListView list;
     private Button cleanBtn;
@@ -138,7 +156,10 @@ public class MainActivity extends Activity {
         if (!root.isAlive()) {
             String err = connect();
             if (err != null) {
-                ui.post(() -> banner(err, c.bad));
+                ui.post(() -> {
+                    banner(err, c.bad);
+                    chip("");
+                });
                 bg.postDelayed(tickR, 5000);
                 return;
             }
@@ -198,79 +219,137 @@ public class MainActivity extends Activity {
         rootView.setBackgroundColor(c.bg);
         rootView.setFitsSystemWindows(true);
 
-        LinearLayout header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.VERTICAL);
-        header.setPadding(dp(16), dp(14), dp(16), dp(12));
-        header.setBackground(round(c.card, 0));
-        TextView title = text("热源猎手", 22, c.fg, true);
-        header.addView(title);
-        headDevice = text("", 12, c.dim, false);
-        header.addView(headDevice);
-        headTemp = text("—", 15, c.fg, true);
-        headTemp.setPadding(0, dp(8), 0, 0);
-        header.addView(headTemp);
-        headPower = text("", 13, c.fg, false);
-        header.addView(headPower);
-        headLoad = text("", 12, c.dim, false);
-        header.addView(headLoad);
+        // 头部（随列表一起滚动）
+        LinearLayout header = col();
+        header.setPadding(dp(16), dp(14), dp(16), dp(6));
+
+        // 顶栏：标题 / 设备 / 模式标签 / 设置
+        LinearLayout top = new LinearLayout(this);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout titleCol = col();
+        titleCol.addView(text("热源猎手", 24, c.fg, true));
+        headDevice = text("正在连接…", 12, c.dim, false);
+        headDevice.setMaxLines(2);
+        headDevice.setEllipsize(TextUtils.TruncateAt.END);
+        titleCol.addView(headDevice);
+        top.addView(titleCol, new LinearLayout.LayoutParams(0, -2, 1));
+        modeChip = text("", 11, c.dim, true);
+        modeChip.setPadding(dp(10), dp(4), dp(10), dp(4));
+        top.addView(modeChip, margins(-2, -2, dp(8), 0, 0, 0));
+        ImageView gear = new ImageView(this);
+        gear.setImageResource(R.drawable.ic_tune);
+        gear.setColorFilter(c.fg);
+        gear.setPadding(dp(10), dp(10), dp(10), dp(10));
+        gear.setBackground(ripple(card(dp(20))));
+        gear.setContentDescription("设置");
+        gear.setOnClickListener(v -> showSettings());
+        top.addView(gear, margins(dp(42), dp(42), dp(8), 0, 0, 0));
+        header.addView(top);
+        chip("");
+
+        // 温度 / 功耗卡片
+        hero = new LinearLayout(this);
+        hero.setGravity(Gravity.CENTER_VERTICAL);
+        hero.setPadding(dp(18), dp(16), dp(18), dp(18));
+        hero.setBackground(gradient(GRAD_NONE, dp(24)));
+        hero.setElevation(dp(2));
+        LinearLayout hl = col();
+        heroLabel = text("SoC 温度", 12, 0xDDFFFFFF, false);
+        heroTemp = text("--", 40, Color.WHITE, true);
+        heroTemp.setFontFeatureSettings("tnum");
+        heroTempSub = text("", 12, 0xDDFFFFFF, false);
+        hl.addView(heroLabel);
+        hl.addView(heroTemp);
+        hl.addView(heroTempSub);
+        hero.addView(hl, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout hr = col();
+        hr.setGravity(Gravity.END);
+        heroPowerLabel = text("放电功耗", 12, 0xDDFFFFFF, false);
+        heroPower = text("--", 26, Color.WHITE, true);
+        heroPower.setFontFeatureSettings("tnum");
+        heroPowerSub = text("", 12, 0xDDFFFFFF, false);
+        hr.addView(heroPowerLabel);
+        hr.addView(heroPower);
+        hr.addView(heroPowerSub);
+        hero.addView(hr, margins(-2, -2, dp(12), 0, 0, 0));
+        header.addView(hero, margins(-1, -2, 0, dp(14), 0, 0));
+
+        // 负载卡片：CPU 各簇频率 + GPU
+        LinearLayout load = col();
+        load.setPadding(dp(14), dp(12), dp(14), dp(14));
+        load.setBackground(card(dp(20)));
+        LinearLayout lt = new LinearLayout(this);
+        lt.setGravity(Gravity.CENTER_VERTICAL);
+        lt.addView(text("实时负载", 14, c.fg, true), new LinearLayout.LayoutParams(0, -2, 1));
+        loadSummary = text("", 12, c.dim, false);
+        loadSummary.setFontFeatureSettings("tnum");
+        lt.addView(loadSummary);
+        load.addView(lt);
+        clusterRow = new LinearLayout(this);
+        load.addView(clusterRow, margins(-1, -2, 0, dp(10), 0, 0));
+        header.addView(load, margins(-1, -2, 0, dp(12), 0, 0));
+
+        // 提示条
         banner = text("", 12, c.warn, false);
         banner.setVisibility(View.GONE);
-        banner.setPadding(dp(10), dp(8), dp(10), dp(8));
-        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-1, -2);
-        blp.topMargin = dp(8);
-        header.addView(banner, blp);
-        rootView.addView(header);
+        banner.setPadding(dp(14), dp(10), dp(14), dp(10));
+        banner.setLineSpacing(dp(2), 1f);
+        header.addView(banner, margins(-1, -2, 0, dp(12), 0, 0));
 
+        // 分段式标签
         LinearLayout tabs = new LinearLayout(this);
-        tabs.setOrientation(LinearLayout.HORIZONTAL);
-        tabs.setPadding(dp(8), dp(6), dp(8), dp(6));
+        tabs.setPadding(dp(4), dp(4), dp(4), dp(4));
+        tabs.setBackground(card(dp(16)));
         for (int i = 0; i < TABS.length; i++) {
             final int idx = i;
-            TextView t = text(TABS[i], 14, c.fg, true);
+            TextView t = text(TABS[i], 13, c.dim, true);
             t.setGravity(Gravity.CENTER);
-            t.setPadding(0, dp(8), 0, dp(8));
+            t.setSingleLine(true);
+            t.setPadding(0, dp(9), 0, dp(9));
             t.setOnClickListener(v -> {
+                if (tab == idx) return;
                 tab = idx;
                 updateTabs();
                 if (result != null) render(result);
-                list.setSelection(0);
             });
             tabViews[i] = t;
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1);
-            lp.setMargins(dp(3), 0, dp(3), 0);
-            tabs.addView(t, lp);
+            tabs.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
         }
-        rootView.addView(tabs);
+        header.addView(tabs, margins(-1, -2, 0, dp(14), 0, dp(4)));
         updateTabs();
 
         list = new ListView(this);
         list.setDivider(null);
-        list.setPadding(dp(10), 0, dp(10), dp(8));
+        list.setSelector(new ColorDrawable(Color.TRANSPARENT)); // 卡片自带水波纹
+        list.setPadding(0, 0, 0, dp(8));
         list.setClipToPadding(false);
+        list.addHeaderView(header, null, false);
+        LinearLayout footer = new LinearLayout(this);
+        emptyText = text("正在采集…", 13, c.dim, false);
+        emptyText.setGravity(Gravity.CENTER);
+        emptyText.setPadding(dp(24), dp(36), dp(24), dp(36));
+        footer.addView(emptyText, new LinearLayout.LayoutParams(-1, -2));
+        list.addFooterView(footer, null, false);
         list.setAdapter(adapter);
-        list.setOnItemClickListener((p, v, pos, id) -> showDetail(adapter.items.get(pos)));
+        list.setOnItemClickListener((p, v, pos, id) -> {
+            Object o = p.getItemAtPosition(pos);
+            if (o instanceof Entity) showDetail((Entity) o);
+        });
         rootView.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
 
         LinearLayout bottom = new LinearLayout(this);
-        bottom.setOrientation(LinearLayout.HORIZONTAL);
-        bottom.setPadding(dp(12), dp(8), dp(12), dp(12));
+        bottom.setPadding(dp(16), dp(8), dp(16), dp(14));
         cleanBtn = new Button(this);
         cleanBtn.setText("一键清理异常");
         cleanBtn.setTextColor(Color.WHITE);
         cleanBtn.setTextSize(16);
+        cleanBtn.setTypeface(Typeface.DEFAULT_BOLD);
         cleanBtn.setAllCaps(false);
-        cleanBtn.setBackground(round(c.accent, dp(24)));
+        cleanBtn.setStateListAnimator(null);
+        cleanBtn.setElevation(dp(3));
+        cleanBtn.setBackground(ripple(round(c.accent, dp(26))));
         cleanBtn.setOnClickListener(v -> confirmClean());
-        bottom.addView(cleanBtn, new LinearLayout.LayoutParams(0, dp(48), 1));
-        Button settings = new Button(this);
-        settings.setText("设置");
-        settings.setAllCaps(false);
-        settings.setTextColor(c.fg);
-        settings.setBackground(round(c.card, dp(24)));
-        settings.setOnClickListener(v -> showSettings());
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(dp(80), dp(48));
-        slp.leftMargin = dp(10);
-        bottom.addView(settings, slp);
+        bottom.addView(cleanBtn, new LinearLayout.LayoutParams(-1, dp(52)));
         rootView.addView(bottom);
         return rootView;
     }
@@ -278,16 +357,25 @@ public class MainActivity extends Activity {
     private void updateTabs() {
         for (int i = 0; i < tabViews.length; i++) {
             boolean sel = i == tab;
-            tabViews[i].setTextColor(sel ? Color.WHITE : c.fg);
-            tabViews[i].setBackground(round(sel ? c.accent : c.card, dp(18)));
+            tabViews[i].setText(tabCounts[i] > 0 ? TABS[i] + " " + tabCounts[i] : TABS[i]);
+            tabViews[i].setTextColor(sel ? Color.WHITE : c.dim);
+            tabViews[i].setBackground(sel ? round(c.accent, dp(12)) : null);
         }
     }
 
     private void banner(String msg, int color) {
         banner.setText(msg);
         banner.setTextColor(color);
-        banner.setBackground(round(c.bannerBg, dp(8)));
+        banner.setBackground(round(tint(color), dp(14)));
         banner.setVisibility(msg == null || msg.isEmpty() ? View.GONE : View.VISIBLE);
+    }
+
+    /** 顶栏模式标签：root / shell / 未连接。 */
+    private void chip(String mode) {
+        int col = "root".equals(mode) ? c.good : "shell".equals(mode) ? c.accent : c.dim;
+        modeChip.setText("root".equals(mode) ? "ROOT" : "shell".equals(mode) ? "SHIZUKU" : "未连接");
+        modeChip.setTextColor(col);
+        modeChip.setBackground(round(tint(col), dp(12)));
     }
 
     // ------------------------------------------------------------------ 渲染
@@ -295,45 +383,54 @@ public class MainActivity extends Activity {
     private void render(Analyzer.Result r) {
         result = r;
         JSONObject s = r.snap;
+        String mode = s.optString("mode");
+        boolean shell = "shell".equals(mode);
+        chip(mode);
         JSONObject dev = s.optJSONObject("device");
         if (dev != null) {
             headDevice.setText(dev.optString("model") + " · " + dev.optString("soc") + " · Android "
-                    + dev.optString("android") + "\n内核 " + dev.optString("kernel") + " · "
-                    + ("shell".equals(s.optString("mode")) ? "Shizuku（shell 权限）" : s.optString("rootImpl")));
+                    + dev.optString("android") + "\n内核 " + dev.optString("kernel")
+                    + (shell ? "" : " · " + s.optString("rootImpl")));
         }
-        StringBuilder t = new StringBuilder();
-        if (r.maxTemp > -999) t.append("SoC ").append(Analyzer.fmt(r.maxTemp)).append("°C");
-        if (r.skinTemp > -999) t.append("   机身 ").append(Analyzer.fmt(r.skinTemp)).append("°C");
-        if (r.batteryTemp > -999) t.append("   电池 ").append(Analyzer.fmt(r.batteryTemp)).append("°C");
-        headTemp.setText(t.length() == 0 ? "温度不可读" : t.toString());
-        double hot = Math.max(r.maxTemp, r.skinTemp);
-        headTemp.setTextColor(hot >= 50 ? c.bad : hot >= 42 ? c.warn : c.good);
 
+        // 温度卡片
+        boolean hasSoc = r.maxTemp > -999;
+        double mainTemp = hasSoc ? r.maxTemp : r.skinTemp;
+        heroLabel.setText(hasSoc ? "SoC 温度" : "机身温度");
+        heroTemp.setText(mainTemp > -999 ? Analyzer.fmt(mainTemp) + "°C" : "--");
+        List<String> tsub = new ArrayList<>();
+        if (hasSoc && r.skinTemp > -999) tsub.add("机身 " + Analyzer.fmt(r.skinTemp) + "°");
+        if (r.batteryTemp > -999) tsub.add("电池 " + Analyzer.fmt(r.batteryTemp) + "°");
+        heroTempSub.setText(TextUtils.join("  ·  ", tsub));
+        double hot = Math.max(r.maxTemp, r.skinTemp);
+        hero.setBackground(gradient(hot <= -999 ? GRAD_NONE : hot >= 50 ? GRAD_HOT : hot >= 42 ? GRAD_WARM : GRAD_COOL, dp(24)));
         JSONObject bat = s.optJSONObject("battery");
         if (bat != null) {
-            String p = r.discharging
-                    ? String.format(Locale.US, "放电功耗 %.2f W（%d mA）", bat.optLong("powerMw") / 1000.0, Math.abs(bat.optLong("currentMa")))
-                    : "充电中 " + bat.optLong("currentMa") + " mA（充电时无法估算功耗）";
-            headPower.setText("电量 " + bat.optLong("level") + "%  ·  " + p);
-        }
-        StringBuilder load = new StringBuilder();
-        JSONObject cpu = s.optJSONObject("cpu");
-        if (cpu != null) {
-            load.append("CPU ").append(Analyzer.fmt(cpu.optDouble("usage"))).append("%  ");
-            JSONArray pol = cpu.optJSONArray("policies");
-            if (pol != null) for (int i = 0; i < pol.length(); i++) {
-                JSONObject o = pol.optJSONObject(i);
-                load.append(o.optString("cpus").replace(" ", ",")).append(":").append(o.optLong("cur"))
-                        .append("/").append(o.optLong("limit")).append("MHz  ");
+            long ma = Math.abs(bat.optLong("currentMa"));
+            if (r.discharging) {
+                heroPowerLabel.setText("放电功耗");
+                heroPower.setText(String.format(Locale.US, "%.2f W", bat.optLong("powerMw") / 1000.0));
+                heroPowerSub.setText(ma + " mA · 电量 " + bat.optLong("level") + "%");
+            } else {
+                heroPowerLabel.setText("充电中");
+                heroPower.setText(ma + " mA");
+                heroPowerSub.setText("电量 " + bat.optLong("level") + "%");
             }
         }
+
+        // 负载卡片
+        List<String> ls = new ArrayList<>();
+        JSONObject cpu = s.optJSONObject("cpu");
+        if (cpu != null) ls.add("CPU " + Analyzer.fmt(cpu.optDouble("usage")) + "%");
         JSONObject gpu = s.optJSONObject("gpu");
-        if (gpu != null && gpu.length() > 0) {
-            load.append("\nGPU ");
-            if (gpu.has("util")) load.append(gpu.optLong("util")).append("%  ");
-            if (gpu.has("mhz")) load.append(gpu.optLong("mhz")).append("MHz");
+        if (gpu != null && (gpu.has("util") || gpu.has("mhz"))) {
+            String g = "GPU";
+            if (gpu.has("util")) g += " " + gpu.optLong("util") + "%";
+            if (gpu.has("mhz")) g += " " + freq(gpu.optLong("mhz"));
+            ls.add(g);
         }
-        headLoad.setText(load.toString().trim());
+        loadSummary.setText(TextUtils.join("  ·  ", ls));
+        renderClusters(cpu == null ? null : cpu.optJSONArray("policies"));
 
         List<String> notes = new ArrayList<>();
         if ("shell".equals(s.optString("mode"))) {
@@ -346,12 +443,17 @@ public class MainActivity extends Activity {
                     : "⚠ 唤醒统计数据已过期 " + r.hookAgeSec + " 秒");
         }
         JSONObject lsp = s.optJSONObject("lsp");
-        if (!"shell".equals(s.optString("mode")) && lsp != null && !lsp.optBoolean("available") && lsp.has("error")) notes.add("LSPosed：" + lsp.optString("error"));
+        if (!shell && lsp != null && !lsp.optBoolean("available") && lsp.has("error")) notes.add("LSPosed：" + lsp.optString("error"));
         if (notes.isEmpty()) banner.setVisibility(View.GONE);
-        else banner(TextUtils.join("\n", notes), c.warn);
+        else banner(TextUtils.join("\n", notes), shell ? c.accent : c.warn);
 
         cleanBtn.setText(r.badCount > 0 ? "一键清理异常（" + r.badCount + "）" : "一键清理异常");
-        cleanBtn.setBackground(round(r.badCount > 0 ? c.bad : c.accent, dp(24)));
+        cleanBtn.setBackground(ripple(round(r.badCount > 0 ? c.bad : c.accent, dp(26))));
+        tabCounts[0] = flagged(r.heat);
+        tabCounts[1] = flagged(r.ksu);
+        tabCounts[2] = flagged(r.lsp);
+        tabCounts[3] = flagged(r.wake);
+        updateTabs();
 
         List<Entity> items;
         switch (tab) {
@@ -366,6 +468,84 @@ public class MainActivity extends Activity {
                 }
         }
         adapter.set(items);
+        emptyText.setText(emptyMessage(shell));
+        emptyText.setVisibility(items.isEmpty() ? View.VISIBLE : View.GONE);
+    }
+
+    private static int flagged(List<Entity> l) {
+        int n = 0;
+        for (Entity e : l) if (e.level != Analyzer.OK) n++;
+        return n;
+    }
+
+    private String emptyMessage(boolean shell) {
+        switch (tab) {
+            case 1: return shell ? "Shizuku 模式无法读取 KSU 模块（需要 root）" : "没有发现 KSU 模块";
+            case 2: return shell ? "Shizuku 模式无法读取 LSPosed 模块（需要 root）" : "没有发现 LSPosed 模块";
+            case 3: return shell ? "Shizuku 模式无法统计应用唤醒（需要 root + LSPosed）"
+                    : "暂无唤醒数据（需要在 LSPosed 中激活本模块）";
+            default: return "没有明显的热源，手机状态良好 👍";
+        }
+    }
+
+    /** CPU 各簇：当前频率、频率条、限频提示。 */
+    private void renderClusters(JSONArray pol) {
+        int n = pol == null ? 0 : pol.length();
+        if (clusterRow.getChildCount() != n) {
+            clusterRow.removeAllViews();
+            for (int i = 0; i < n; i++) {
+                LinearLayout t = col();
+                t.setPadding(dp(10), dp(8), dp(10), dp(9));
+                t.setBackground(round(c.sunken, dp(12)));
+                TextView name = text("", 11, c.dim, false);
+                name.setSingleLine(true);
+                TextView val = text("", 15, c.fg, true);
+                val.setFontFeatureSettings("tnum");
+                val.setSingleLine(true);
+                Bar bar = new Bar(this, c.track);
+                TextView lim = text("", 10, c.dim, false);
+                lim.setSingleLine(true);
+                t.addView(name);
+                t.addView(val);
+                t.addView(bar, margins(-1, dp(4), 0, dp(6), 0, dp(5)));
+                t.addView(lim);
+                t.setTag(new Object[]{name, val, bar, lim});
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1);
+                if (i > 0) lp.leftMargin = dp(8);
+                clusterRow.addView(t, lp);
+            }
+        }
+        clusterRow.setVisibility(n == 0 ? View.GONE : View.VISIBLE);
+        for (int i = 0; i < n; i++) {
+            JSONObject o = pol.optJSONObject(i);
+            if (o == null) continue;
+            Object[] v = (Object[]) clusterRow.getChildAt(i).getTag();
+            long cur = o.optLong("cur"), max = o.optLong("max"), limit = o.optLong("limit");
+            boolean throttled = limit > 0 && max > 0 && limit < max;
+            ((TextView) v[0]).setText("CPU " + cpuRange(o.optString("cpus")));
+            ((TextView) v[1]).setText(freq(cur));
+            ((Bar) v[2]).set(max > 0 ? cur / (float) max : 0, throttled ? c.warn : c.accent);
+            TextView lim = (TextView) v[3];
+            lim.setText(throttled ? "限频 " + freq(limit) : "最高 " + freq(max));
+            lim.setTextColor(throttled ? c.warn : c.dim);
+        }
+    }
+
+    /** "4 5 6" → "4-6"；不连续时用逗号。 */
+    private static String cpuRange(String cpus) {
+        String[] f = cpus.trim().split("[\\s,]+");
+        try {
+            int a = Integer.parseInt(f[0]), b = Integer.parseInt(f[f.length - 1]);
+            if (f.length == 1) return String.valueOf(a);
+            if (b - a + 1 == f.length) return a + "-" + b;
+        } catch (NumberFormatException ignored) {
+        }
+        return TextUtils.join(",", f);
+    }
+
+    private static String freq(long mhz) {
+        if (mhz <= 0) return "--";
+        return mhz >= 1000 ? String.format(Locale.US, "%.2fG", mhz / 1000.0) : mhz + "M";
     }
 
     private Object[] appInfo(String pkg) {
@@ -401,29 +581,32 @@ public class MainActivity extends Activity {
         }
     }
 
-    private String metrics(Entity e) {
-        StringBuilder sb = new StringBuilder();
+    /** @param full 详情页显示全部；列表卡片中 CPU 已在右侧大字显示，故省略 */
+    private String metrics(Entity e, boolean full) {
         if (tab == 3) {
+            StringBuilder sb = new StringBuilder();
             sb.append("累计持锁 ").append(dur(e.wlHeldTotalMs)).append(" · 唤醒闹钟 ").append(e.alarmsTotal).append(" 次");
             if (e.wlFrac >= 0) sb.append("\n近2分钟：持锁 ").append(Math.round(e.wlFrac * 100)).append("% · 闹钟 ")
                     .append(Analyzer.fmt(e.alarmsPerMin)).append("/分");
             if (e.wlTag != null && !e.wlTag.isEmpty()) sb.append("\n锁: ").append(e.wlTag);
             return sb.toString();
         }
+        List<String> p = new ArrayList<>();
         if (e.type == Analyzer.LSP) {
-            sb.append(e.sub).append(" · 作用域 CPU ").append(Analyzer.fmt(e.scopeCpu)).append("%");
-            if (!e.pids.isEmpty()) sb.append(" · 自身 CPU ").append(Analyzer.fmt(e.cpuAvg)).append("%");
-            return sb.toString();
+            p.add(e.sub);
+            if (full) p.add("作用域 CPU " + Analyzer.fmt(e.scopeCpu) + "%");
+            if (!e.pids.isEmpty()) p.add("自身 CPU " + Analyzer.fmt(e.cpuAvg) + "%");
+            return TextUtils.join(" · ", p);
         }
-        sb.append("CPU ").append(Analyzer.fmt(e.cpuAvg)).append("%");
-        if (e.powerMw > 0) sb.append(" · ≈").append(e.powerMw).append("mW");
-        if (e.rssKb > 0) sb.append(" · 内存 ").append(e.rssKb / 1024).append("MB");
-        if (e.type == Analyzer.KSU) sb.append(" · 进程 ").append(e.pids.size());
-        else if (e.pids.size() > 1) sb.append(" · ").append(e.pids.size()).append(" 个进程");
-        else if (e.pids.size() == 1) sb.append(" · pid ").append(e.pids.get(0));
-        if (e.type == Analyzer.APP && e.wlFrac > 0.05) sb.append(" · 持锁 ").append(Math.round(e.wlFrac * 100)).append("%");
-        if (e.type == Analyzer.APP && e.minAdj <= 1000) sb.append(" · ").append(adjName(e.minAdj));
-        return sb.toString();
+        if (full) p.add("CPU " + Analyzer.fmt(e.cpuAvg) + "%");
+        if (e.powerMw > 0) p.add("≈" + e.powerMw + "mW");
+        if (e.rssKb > 0) p.add("内存 " + e.rssKb / 1024 + "MB");
+        if (e.type == Analyzer.KSU) p.add("进程 " + e.pids.size());
+        else if (e.pids.size() > 1) p.add(e.pids.size() + " 个进程");
+        else if (e.pids.size() == 1) p.add("pid " + e.pids.get(0));
+        if (e.type == Analyzer.APP && e.wlFrac > 0.05) p.add("持锁 " + Math.round(e.wlFrac * 100) + "%");
+        if (e.type == Analyzer.APP && e.minAdj <= 1000) p.add(adjName(e.minAdj));
+        return TextUtils.join(" · ", p);
     }
 
     private static String adjName(int adj) {
@@ -448,7 +631,7 @@ public class MainActivity extends Activity {
         StringBuilder sb = new StringBuilder();
         sb.append(typeName(e)).append("：").append(e.title).append('\n');
         if (!e.sub.isEmpty()) sb.append(e.sub).append('\n');
-        sb.append(metrics(e)).append("\n");
+        sb.append(metrics(e, true)).append("\n");
         for (String r : e.reasons) sb.append("\n❗ ").append(r);
         for (String w : e.warnings) sb.append("\n⚠ ").append(w);
         if (!e.tags.isEmpty()) sb.append("\n标签：").append(TextUtils.join("、", e.tags));
@@ -714,36 +897,52 @@ public class MainActivity extends Activity {
             if (convert == null) {
                 h = new Holder();
                 LinearLayout row = new LinearLayout(MainActivity.this);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                row.setPadding(dp(12), dp(10), dp(12), dp(10));
+                row.setPadding(dp(14), dp(12), dp(14), dp(12));
+                row.setDuplicateParentStateEnabled(true); // 让卡片水波纹响应列表点击
+
+                FrameLayout iconBox = new FrameLayout(MainActivity.this);
                 h.icon = new ImageView(MainActivity.this);
-                LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(36), dp(36));
-                ilp.rightMargin = dp(12);
-                ilp.topMargin = dp(2);
-                row.addView(h.icon, ilp);
-                LinearLayout col = new LinearLayout(MainActivity.this);
-                col.setOrientation(LinearLayout.VERTICAL);
+                iconBox.addView(h.icon, new FrameLayout.LayoutParams(-1, -1));
+                h.letter = text("", 17, Color.WHITE, true);
+                h.letter.setGravity(Gravity.CENTER);
+                iconBox.addView(h.letter, new FrameLayout.LayoutParams(-1, -1));
+                row.addView(iconBox, margins(dp(42), dp(42), 0, 0, dp(12), 0));
+
+                LinearLayout colv = col();
                 LinearLayout top = new LinearLayout(MainActivity.this);
                 top.setGravity(Gravity.CENTER_VERTICAL);
                 h.title = text("", 15, c.fg, true);
                 h.title.setSingleLine(true);
                 h.title.setEllipsize(TextUtils.TruncateAt.END);
                 top.addView(h.title, new LinearLayout.LayoutParams(0, -2, 1));
-                h.badge = text("", 11, Color.WHITE, true);
-                h.badge.setPadding(dp(7), dp(2), dp(7), dp(2));
-                top.addView(h.badge);
-                col.addView(top);
+                h.badge = text("", 10, c.bad, true);
+                h.badge.setPadding(dp(8), dp(2), dp(8), dp(2));
+                top.addView(h.badge, margins(-2, -2, dp(6), 0, 0, 0));
+                colv.addView(top);
                 h.sub = text("", 11, c.dim, false);
                 h.sub.setSingleLine(true);
                 h.sub.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-                col.addView(h.sub);
-                h.metrics = text("", 12, c.fg, false);
-                col.addView(h.metrics);
+                colv.addView(h.sub, margins(-1, -2, 0, dp(1), 0, 0));
+                h.metrics = text("", 12, c.dim, false);
+                colv.addView(h.metrics, margins(-1, -2, 0, dp(4), 0, 0));
+                h.bar = new Bar(MainActivity.this, c.track);
+                colv.addView(h.bar, margins(-1, dp(3), 0, dp(8), 0, 0));
                 h.reasons = text("", 12, c.bad, false);
-                col.addView(h.reasons);
-                row.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
+                h.reasons.setLineSpacing(dp(1), 1f);
+                colv.addView(h.reasons, margins(-1, -2, 0, dp(6), 0, 0));
+                row.addView(colv, new LinearLayout.LayoutParams(0, -2, 1));
+
+                LinearLayout valCol = col();
+                valCol.setGravity(Gravity.END);
+                h.value = text("", 17, c.fg, true);
+                h.value.setFontFeatureSettings("tnum");
+                h.caption = text("", 10, c.dim, false);
+                valCol.addView(h.value);
+                valCol.addView(h.caption);
+                row.addView(valCol, margins(-2, -2, dp(10), 0, 0, 0));
+
                 LinearLayout wrap = new LinearLayout(MainActivity.this);
-                wrap.setPadding(0, dp(4), 0, dp(4));
+                wrap.setPadding(dp(16), dp(5), dp(16), dp(5));
                 wrap.addView(row, new LinearLayout.LayoutParams(-1, -2));
                 h.card = row;
                 wrap.setTag(h);
@@ -752,11 +951,34 @@ public class MainActivity extends Activity {
                 h = (Holder) convert.getTag();
             }
             Entity e = items.get(pos);
-            h.title.setText(label(e));
+            String name = label(e);
+            h.title.setText(name);
             String sub = typeName(e) + " · " + (e.type == Analyzer.KSU ? e.sub : e.title);
             if (!e.enabled) sub = "已禁用 · " + sub;
             h.sub.setText(sub);
-            h.metrics.setText(metrics(e));
+            String m = metrics(e, false);
+            h.metrics.setText(m);
+            h.metrics.setVisibility(m.isEmpty() ? View.GONE : View.VISIBLE);
+
+            // 右侧主数值 + 占用条
+            double frac;
+            if (tab == 3) {
+                h.value.setText(e.wlFrac >= 0 ? Math.round(e.wlFrac * 100) + "%" : "--");
+                h.caption.setText("持锁");
+                frac = Math.max(0, e.wlFrac);
+            } else if (e.type == Analyzer.LSP) {
+                h.value.setText(Analyzer.fmt(e.scopeCpu) + "%");
+                h.caption.setText("作用域 CPU");
+                frac = e.scopeCpu / 100;
+            } else {
+                h.value.setText(Analyzer.fmt(e.cpuAvg) + "%");
+                h.caption.setText("CPU");
+                frac = e.cpuAvg / 100;
+            }
+            int lc = e.level == Analyzer.BAD ? c.bad : e.level == Analyzer.WARN ? c.warn : c.accent;
+            h.value.setTextColor(e.level == Analyzer.OK ? c.fg : lc);
+            h.bar.set((float) Math.min(1, frac), lc);
+
             StringBuilder rs = new StringBuilder();
             for (String r : e.reasons) rs.append(rs.length() > 0 ? "\n" : "").append("❗ ").append(r);
             for (String w : e.warnings) rs.append(rs.length() > 0 ? "\n" : "").append("⚠ ").append(w);
@@ -766,22 +988,32 @@ public class MainActivity extends Activity {
             h.reasons.setText(rs);
             h.reasons.setTextColor(e.level == Analyzer.BAD ? c.bad : e.level == Analyzer.WARN ? c.warn : c.dim);
             h.reasons.setVisibility(rs.length() == 0 ? View.GONE : View.VISIBLE);
-            if (e.level == Analyzer.BAD) {
-                h.badge.setText("异常");
-                h.badge.setBackground(round(c.bad, dp(10)));
-                h.badge.setVisibility(View.VISIBLE);
-            } else if (e.level == Analyzer.WARN) {
-                h.badge.setText("可疑");
-                h.badge.setBackground(round(c.warn, dp(10)));
+            if (e.level != Analyzer.OK) {
+                int bc = e.level == Analyzer.BAD ? c.bad : c.warn;
+                h.badge.setText(e.level == Analyzer.BAD ? "异常" : "可疑");
+                h.badge.setTextColor(bc);
+                h.badge.setBackground(round(tint(bc), dp(10)));
                 h.badge.setVisibility(View.VISIBLE);
             } else {
                 h.badge.setVisibility(View.GONE);
             }
+
             Drawable icon = null;
             if (e.type == Analyzer.APP || e.type == Analyzer.LSP) icon = (Drawable) appInfo(e.pkg)[1];
-            if (icon != null) h.icon.setImageDrawable(icon);
-            else h.icon.setImageDrawable(letterIcon(e));
-            h.card.setBackground(round(e.level == Analyzer.BAD ? c.badCard : c.card, dp(14)));
+            if (icon != null) {
+                h.icon.setImageDrawable(icon);
+                h.icon.setBackground(null);
+                h.letter.setVisibility(View.GONE);
+            } else {
+                h.icon.setImageDrawable(null);
+                h.icon.setBackground(round(typeColor(e), dp(12)));
+                h.letter.setText(initial(name));
+                h.letter.setVisibility(View.VISIBLE);
+            }
+
+            GradientDrawable bgd = round(e.level == Analyzer.BAD ? c.badCard : c.card, dp(18));
+            bgd.setStroke(dp(1), e.level == Analyzer.BAD ? alpha(c.bad, 0x55) : c.stroke);
+            h.card.setBackground(ripple(bgd));
             h.card.setAlpha(e.enabled ? 1f : 0.55f);
             return convert;
         }
@@ -790,21 +1022,60 @@ public class MainActivity extends Activity {
     private static final class Holder {
         LinearLayout card;
         ImageView icon;
-        TextView title, sub, metrics, reasons, badge;
+        Bar bar;
+        TextView title, sub, metrics, reasons, badge, letter, value, caption;
     }
 
-    private Drawable letterIcon(Entity e) {
-        GradientDrawable g = new GradientDrawable();
-        g.setShape(GradientDrawable.OVAL);
-        int col;
+    private static int typeColor(Entity e) {
         switch (e.type) {
-            case Analyzer.KSU: col = 0xFF7E57C2; break;
-            case Analyzer.KERNEL: col = 0xFF78909C; break;
-            case Analyzer.NATIVE: col = e.ksuId != null ? 0xFF7E57C2 : 0xFF546E7A; break;
-            default: col = 0xFF26A69A;
+            case Analyzer.KSU: return 0xFF8B5CF6;
+            case Analyzer.KERNEL: return 0xFF64748B;
+            case Analyzer.NATIVE: return e.ksuId != null ? 0xFF8B5CF6 : 0xFF0EA5E9;
+            case Analyzer.LSP: return 0xFFF59E0B;
+            default: return 0xFF10B981;
         }
-        g.setColor(col);
-        return g;
+    }
+
+    /** 名称里第一个字母/数字/汉字，用作无图标对象的头像。 */
+    private static String initial(String name) {
+        if (name != null) {
+            for (int i = 0; i < name.length(); ) {
+                int cp = name.codePointAt(i);
+                if (Character.isLetterOrDigit(cp)) return new String(Character.toChars(Character.toUpperCase(cp)));
+                i += Character.charCount(cp);
+            }
+        }
+        return "?";
+    }
+
+    /** 圆角细进度条。 */
+    private static final class Bar extends View {
+        private final Paint track = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF rect = new RectF();
+        private float frac;
+
+        Bar(Context ctx, int trackColor) {
+            super(ctx);
+            track.setColor(trackColor);
+        }
+
+        void set(float f, int color) {
+            frac = Math.max(0f, Math.min(1f, f));
+            fill.setColor(color);
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas cv) {
+            float w = getWidth(), h = getHeight(), r = h / 2f;
+            rect.set(0, 0, w, h);
+            cv.drawRoundRect(rect, r, r, track);
+            if (frac > 0) {
+                rect.set(0, 0, Math.max(h, w * frac), h);
+                cv.drawRoundRect(rect, r, r, fill);
+            }
+        }
     }
 
     // ------------------------------------------------------------------ 小工具
@@ -829,18 +1100,56 @@ public class MainActivity extends Activity {
         return g;
     }
 
+    private LinearLayout col() {
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.VERTICAL);
+        return l;
+    }
+
+    private static LinearLayout.LayoutParams margins(int w, int h, int l, int t, int r, int b) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(w, h);
+        lp.setMargins(l, t, r, b);
+        return lp;
+    }
+
+    /** 带细描边的卡片背景。 */
+    private GradientDrawable card(int radius) {
+        GradientDrawable g = round(c.card, radius);
+        g.setStroke(dp(1), c.stroke);
+        return g;
+    }
+
+    private Drawable ripple(Drawable content) {
+        return new RippleDrawable(ColorStateList.valueOf(alpha(c.fg, 0x1F)), content, null);
+    }
+
+    private static GradientDrawable gradient(int[] colors, int radius) {
+        GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TL_BR, colors);
+        g.setCornerRadius(radius);
+        return g;
+    }
+
+    private static int alpha(int color, int a) {
+        return (color & 0x00FFFFFF) | (a << 24);
+    }
+
+    /** 同色系浅底（标签、提示条）。 */
+    private static int tint(int color) {
+        return alpha(color, 0x24);
+    }
+
     private static final class Palette {
-        final int bg, card, fg, dim, accent, good, warn, bad, badCard, bannerBg;
+        final int bg, card, stroke, sunken, track, fg, dim, accent, good, warn, bad, badCard;
 
         Palette(boolean night) {
             if (night) {
-                bg = 0xFF101214; card = 0xFF1C1F23; fg = 0xFFE8EAED; dim = 0xFF9AA0A6;
-                accent = 0xFF3D7BFD; good = 0xFF5BD18B; warn = 0xFFF2A93B; bad = 0xFFFF5C5C;
-                badCard = 0xFF3A1F22; bannerBg = 0xFF2A2620;
+                bg = 0xFF0E1013; card = 0xFF181B20; stroke = 0xFF262A31; sunken = 0xFF21252B; track = 0xFF2E333B;
+                fg = 0xFFE8EAED; dim = 0xFF9AA0A6; accent = 0xFF5B8CFF;
+                good = 0xFF4ADE80; warn = 0xFFFBBF24; bad = 0xFFF87171; badCard = 0xFF24181B;
             } else {
-                bg = 0xFFF3F4F6; card = 0xFFFFFFFF; fg = 0xFF1F2328; dim = 0xFF6B7280;
-                accent = 0xFF2563EB; good = 0xFF16A34A; warn = 0xFFD97706; bad = 0xFFDC2626;
-                badCard = 0xFFFDECEC; bannerBg = 0xFFFFF7E6;
+                bg = 0xFFF4F5F9; card = 0xFFFFFFFF; stroke = 0xFFE7E9F0; sunken = 0xFFF4F5F9; track = 0xFFE4E7EE;
+                fg = 0xFF111827; dim = 0xFF6B7280; accent = 0xFF3B6EF5;
+                good = 0xFF16A34A; warn = 0xFFD97706; bad = 0xFFDC2626; badCard = 0xFFFFF6F6;
             }
         }
     }
