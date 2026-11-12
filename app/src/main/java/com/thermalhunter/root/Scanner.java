@@ -160,6 +160,7 @@ final class Scanner {
         d.put("android", Sys.prop("ro.build.version.release"));
         d.put("rom", firstNonEmpty(Sys.prop("ro.vivo.os.build.display.id"), Sys.prop("ro.build.display.id")));
         String kv = Sys.readTrim("/proc/sys/kernel/osrelease");
+        if (kv == null || kv.isEmpty()) kv = System.getProperty("os.version"); // shell 身份读不到 /proc/sys
         d.put("kernel", kv == null ? "" : kv);
         device = d;
         return d;
@@ -563,7 +564,41 @@ final class Scanner {
             o.put("temp", round1(c));
             arr.put(o);
         }
+        if (arr.length() == 0) thermalFromService(arr);
         return arr;
+    }
+
+    private static final java.util.regex.Pattern THERMAL_RE = java.util.regex.Pattern.compile(
+            "Temperature\\{mValue=([-0-9.]+), mType=(-?\\d+), mName=([^,}]+)");
+
+    /**
+     * shell 身份（Shizuku 模式）被 SELinux 禁止读取 /sys/class/thermal，
+     * 改从 thermalservice 取温控 HAL 上报的温度。类型前缀便于 Analyzer 区分 SoC / 机身。
+     */
+    private void thermalFromService(JSONArray arr) throws Exception {
+        Object[] r = Sys.execMax(256 << 10, "dumpsys", "thermalservice");
+        if ((int) r[0] != 0) return;
+        java.util.regex.Matcher m = THERMAL_RE.matcher(String.valueOf(r[1]));
+        Set<String> seen = new HashSet<>();
+        while (m.find()) {
+            String name = m.group(3).trim();
+            if (!seen.add(name)) continue; // 先出现的是「当前温度」段，后面的缓存段跳过
+            double t;
+            int type;
+            try {
+                t = Double.parseDouble(m.group(1));
+                type = Integer.parseInt(m.group(2));
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            if (t < -30 || t > 150) continue;
+            // Temperature.TYPE_CPU=0, GPU=1, BATTERY=2, SKIN=3
+            String prefix = type == 0 ? "cpu" : type == 1 ? "gpu" : type == 2 ? "battery" : type == 3 ? "skin" : "";
+            JSONObject o = new JSONObject();
+            o.put("type", prefix.isEmpty() ? name : prefix + ":" + name);
+            o.put("temp", round1(t));
+            arr.put(o);
+        }
     }
 
     private JSONArray kernelWakeups() throws Exception {

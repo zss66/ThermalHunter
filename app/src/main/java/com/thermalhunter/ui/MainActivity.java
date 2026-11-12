@@ -6,6 +6,8 @@ import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Canvas;
@@ -17,6 +19,7 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
+import android.os.BatteryManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -166,6 +169,7 @@ public class MainActivity extends Activity {
         }
         JSONObject snap = root.safeCall("SNAPSHOT");
         if (snap.optBoolean("ok")) {
+            fillBattery(snap);
             Analyzer.Result r = analyzer.update(snap);
             ui.post(() -> render(r));
         } else {
@@ -173,6 +177,39 @@ public class MainActivity extends Activity {
             ui.post(() -> banner("采集失败：" + err, c.bad));
         }
         if (running) bg.postDelayed(tickR, INTERVAL_MS);
+    }
+
+    /**
+     * shell 身份（Shizuku 模式）读不到 /sys/class/power_supply，
+     * 用应用自身的 BatteryManager 补齐电量、电流、电压、温度和充电状态。
+     */
+    private void fillBattery(JSONObject snap) {
+        JSONObject b = snap.optJSONObject("battery");
+        if (b != null && b.optLong("level", -1) >= 0 && !b.optString("status").isEmpty()) return;
+        try {
+            Intent i = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            BatteryManager bm = getSystemService(BatteryManager.class);
+            JSONObject o = new JSONObject();
+            int level = i == null ? -1 : i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+            int scale = i == null ? 100 : i.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+            o.put("level", level >= 0 ? level * 100 / Math.max(1, scale)
+                    : bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY));
+            int st = i == null ? -1 : i.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+            o.put("status", st == BatteryManager.BATTERY_STATUS_CHARGING ? "Charging"
+                    : st == BatteryManager.BATTERY_STATUS_DISCHARGING ? "Discharging"
+                    : st == BatteryManager.BATTERY_STATUS_NOT_CHARGING ? "Not charging"
+                    : st == BatteryManager.BATTERY_STATUS_FULL ? "Full" : "");
+            int cur = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW); // 一般为 µA
+            double ma = cur == Integer.MIN_VALUE ? 0 : Math.abs(cur) > 20000 ? cur / 1000.0 : cur;
+            int mv = i == null ? 0 : i.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0);
+            o.put("currentMa", Math.round(ma));
+            o.put("voltageMv", mv);
+            o.put("powerMw", Math.round(Math.abs(ma) * mv / 1000.0));
+            int t = i == null ? Integer.MIN_VALUE : i.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Integer.MIN_VALUE);
+            if (t != Integer.MIN_VALUE) o.put("tempC", t / 10.0);
+            snap.put("battery", o);
+        } catch (Throwable ignored) {
+        }
     }
 
     /** 按工作模式建立后台会话；成功返回 null，失败返回给用户看的说明。在 bg 线程执行。 */
@@ -394,27 +431,31 @@ public class MainActivity extends Activity {
         }
 
         // 温度卡片
-        boolean hasSoc = r.maxTemp > -999;
-        double mainTemp = hasSoc ? r.maxTemp : r.skinTemp;
-        heroLabel.setText(hasSoc ? "SoC 温度" : "机身温度");
+        boolean hasSoc = r.maxTemp > -999, hasSkin = r.skinTemp > -999;
+        double mainTemp = hasSoc ? r.maxTemp : hasSkin ? r.skinTemp : r.batteryTemp;
+        heroLabel.setText(hasSoc ? "SoC 温度" : hasSkin ? "机身温度" : "电池温度");
         heroTemp.setText(mainTemp > -999 ? Analyzer.fmt(mainTemp) + "°C" : "--");
         List<String> tsub = new ArrayList<>();
-        if (hasSoc && r.skinTemp > -999) tsub.add("机身 " + Analyzer.fmt(r.skinTemp) + "°");
-        if (r.batteryTemp > -999) tsub.add("电池 " + Analyzer.fmt(r.batteryTemp) + "°");
+        if (hasSoc && hasSkin) tsub.add("机身 " + Analyzer.fmt(r.skinTemp) + "°");
+        if ((hasSoc || hasSkin) && r.batteryTemp > -999) tsub.add("电池 " + Analyzer.fmt(r.batteryTemp) + "°");
         heroTempSub.setText(TextUtils.join("  ·  ", tsub));
         double hot = Math.max(r.maxTemp, r.skinTemp);
+        if (hot <= -999) hot = r.batteryTemp;
         hero.setBackground(gradient(hot <= -999 ? GRAD_NONE : hot >= 50 ? GRAD_HOT : hot >= 42 ? GRAD_WARM : GRAD_COOL, dp(24)));
         JSONObject bat = s.optJSONObject("battery");
         if (bat != null) {
             long ma = Math.abs(bat.optLong("currentMa"));
+            long lv = bat.optLong("level", -1);
+            String lvs = lv >= 0 ? lv + "%" : "--";
             if (r.discharging) {
                 heroPowerLabel.setText("放电功耗");
                 heroPower.setText(String.format(Locale.US, "%.2f W", bat.optLong("powerMw") / 1000.0));
-                heroPowerSub.setText(ma + " mA · 电量 " + bat.optLong("level") + "%");
+                heroPowerSub.setText(ma + " mA · 电量 " + lvs);
             } else {
-                heroPowerLabel.setText("充电中");
-                heroPower.setText(ma + " mA");
-                heroPowerSub.setText("电量 " + bat.optLong("level") + "%");
+                String st = bat.optString("status");
+                heroPowerLabel.setText("Full".equalsIgnoreCase(st) ? "已充满" : st.isEmpty() ? "电池" : "充电中");
+                heroPower.setText(ma > 0 ? ma + " mA" : "--");
+                heroPowerSub.setText("电量 " + lvs);
             }
         }
 
