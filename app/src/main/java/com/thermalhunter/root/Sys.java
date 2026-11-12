@@ -108,6 +108,23 @@ final class Sys {
         }
     }
 
+    /** exec 并把标准输出写入文件（输出很大时使用），标准错误另行收集。返回 [exitCode, stderr]。 */
+    static Object[] execToFile(File out, String... argv) {
+        try {
+            Process p = new ProcessBuilder(argv).redirectOutput(out).start();
+            p.getOutputStream().close();
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            InputStream in = p.getErrorStream();
+            byte[] b = new byte[4096];
+            int n;
+            while ((n = in.read(b)) > 0) if (bos.size() < 65536) bos.write(b, 0, n);
+            int code = p.waitFor();
+            return new Object[]{code, bos.toString("UTF-8").trim()};
+        } catch (Throwable e) {
+            return new Object[]{-1, String.valueOf(e)};
+        }
+    }
+
     static String prop(String key) {
         try {
             Class<?> c = Class.forName("android.os.SystemProperties");

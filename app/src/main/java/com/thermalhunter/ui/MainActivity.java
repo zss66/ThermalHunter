@@ -26,6 +26,7 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.ProgressBar;
 import android.widget.Switch;
 import android.widget.TextView;
 
@@ -63,6 +64,7 @@ public class MainActivity extends Activity implements Monitor.Listener {
     private TextView heroLabel, heroTemp, heroTempSub, heroPowerLabel, heroPower, heroPowerSub;
     private LinearLayout hero, clusterRow;
     private ImageView floatBtn;
+    private LinearLayout profileCard;
     private final int[] tabCounts = new int[TABS.length];
     // 只在状态变化时重设背景，避免每次刷新都重绘
     private int[] lastGrad;
@@ -217,6 +219,28 @@ public class MainActivity extends Activity implements Monitor.Listener {
         }
         header.addView(tabs, Ui.lp(-1, -2, 0, u.dp(14), 0, u.dp(4)));
         updateTabs();
+
+        // 深度分析入口（仅 LSP 模块页、root 模式）
+        profileCard = u.col();
+        profileCard.setPadding(u.dp(14), u.dp(12), u.dp(14), u.dp(14));
+        profileCard.setBackground(u.card(u.dp(20)));
+        profileCard.addView(u.text("深度分析模块占用", 14, u.fg, true));
+        TextView pd = u.text("用系统自带的 simpleperf 采样约 12 秒，按调用栈把 CPU 分到具体模块，"
+                + "比上面的宿主占用更接近模块的真实开销。", 12, u.dim, false);
+        pd.setLineSpacing(u.dp(1), 1f);
+        profileCard.addView(pd, Ui.lp(-1, -2, 0, u.dp(4), 0, 0));
+        LinearLayout pb = new LinearLayout(this);
+        TextView ps = pill("分析 system_server", true);
+        ps.setOnClickListener(v -> runProfile("system_server", "system_server"));
+        pb.addView(ps, Ui.weight(1));
+        TextView ph = pill("分析宿主应用…", false);
+        ph.setOnClickListener(v -> pickHost());
+        LinearLayout.LayoutParams phl = Ui.weight(1);
+        phl.leftMargin = u.dp(8);
+        pb.addView(ph, phl);
+        profileCard.addView(pb, Ui.lp(-1, -2, 0, u.dp(10), 0, 0));
+        profileCard.setVisibility(View.GONE);
+        header.addView(profileCard, Ui.lp(-1, -2, 0, u.dp(8), 0, u.dp(4)));
 
         list = new ListView(this);
         list.setDivider(null);
@@ -416,6 +440,7 @@ public class MainActivity extends Activity implements Monitor.Listener {
                 }
         }
         adapter.set(items);
+        profileCard.setVisibility(tab == 2 && !shell ? View.VISIBLE : View.GONE);
         emptyText.setText(emptyMessage(shell));
         emptyText.setVisibility(items.isEmpty() ? View.VISIBLE : View.GONE);
     }
@@ -618,6 +643,15 @@ public class MainActivity extends Activity implements Monitor.Listener {
                     }
                     break;
                 case Analyzer.LSP:
+                    if (!"shell".equals(result.snap.optString("mode"))) {
+                        Entity host = e.injectsSystem ? null : topHost(e);
+                        if (e.injectsSystem || host != null) {
+                            s.action("深度分析（采样约 12 秒）", Sheet.PRIMARY, () -> {
+                                if (host == null) runProfile("system_server", "system_server");
+                                else runProfile(String.valueOf(mainPid(host)), u.label(host));
+                            });
+                        }
+                    }
                     if (e.enabled) {
                         s.action("在 LSPosed 中禁用", Sheet.DANGER, () -> confirm("禁用 LSPosed 模块「" + name + "」？",
                                 "LSPosed 会缓存配置，需要重启手机才会停止注入。", "禁用",
@@ -733,6 +767,221 @@ public class MainActivity extends Activity implements Monitor.Listener {
             s.add(box, Ui.lp(-1, -2, 0, u.dp(14), 0, 0));
             s.action("好", Sheet.PRIMARY, null).show();
         });
+    }
+
+    // ------------------------------------------------------------------ 深度分析
+
+    private TextView pill(String text, boolean primary) {
+        TextView t = u.text(text, 13, primary ? Color.WHITE : u.fg, true);
+        t.setGravity(Gravity.CENTER);
+        t.setSingleLine(true);
+        t.setPadding(u.dp(8), u.dp(10), u.dp(8), u.dp(10));
+        t.setBackground(u.ripple(Ui.round(primary ? u.accent : u.sunken, u.dp(14))));
+        return t;
+    }
+
+    /** 被 LSP 模块作用的、正在运行的普通应用（不含 system_server），按 CPU 降序。 */
+    private List<Entity> hostApps() {
+        List<Entity> out = new ArrayList<>();
+        if (result == null) return out;
+        java.util.Set<String> scoped = new java.util.HashSet<>();
+        for (Entity m : result.lsp) {
+            JSONArray sc = m.raw == null ? null : m.raw.optJSONArray("scope");
+            if (sc != null) for (int i = 0; i < sc.length(); i++) {
+                JSONObject so = sc.optJSONObject(i);
+                if (so != null) scoped.add(so.optString("pkg"));
+            }
+        }
+        for (Entity e : result.heat) {
+            if (e.type == Analyzer.APP && !e.pids.isEmpty() && scoped.contains(e.pkg)) out.add(e);
+        }
+        java.util.Collections.sort(out, (a, b) -> Double.compare(b.cpuAvg, a.cpuAvg));
+        return out;
+    }
+
+    /** 某个 LSP 模块作用域里 CPU 最高的宿主应用。 */
+    private Entity topHost(Entity lspModule) {
+        JSONArray sc = lspModule.raw == null ? null : lspModule.raw.optJSONArray("scope");
+        if (sc == null) return null;
+        java.util.Set<String> pkgs = new java.util.HashSet<>();
+        for (int i = 0; i < sc.length(); i++) {
+            JSONObject so = sc.optJSONObject(i);
+            if (so != null) pkgs.add(so.optString("pkg"));
+        }
+        for (Entity e : hostApps()) if (pkgs.contains(e.pkg)) return e;
+        return null;
+    }
+
+    /** 应用的主进程（进程名等于包名），找不到时取第一个。 */
+    private static int mainPid(Entity e) {
+        for (int i = 0; i < e.pids.size(); i++) {
+            if (e.pidNames.get(i).split(" ")[0].equals(e.pkg)) return e.pids.get(i);
+        }
+        return e.pids.get(0);
+    }
+
+    private void pickHost() {
+        List<Entity> hosts = hostApps();
+        if (hosts.isEmpty()) {
+            snack("没有正在运行的、被 LSP 模块作用的应用", false);
+            return;
+        }
+        Sheet s = new Sheet(this, u).title("选择要分析的宿主应用", "只列出被 LSPosed 模块作用、且正在运行的应用");
+        for (Entity e : hosts) {
+            String name = u.label(e);
+            LinearLayout r = u.row();
+            r.setPadding(u.dp(12), u.dp(10), u.dp(12), u.dp(10));
+            r.setBackground(u.ripple(Ui.round(u.sunken, u.dp(14))));
+            FrameLayout av = u.avatar(36);
+            u.bindAvatar(av, e, name);
+            r.addView(av, Ui.lp(u.dp(36), u.dp(36), 0, 0, u.dp(10), 0));
+            r.addView(u.text(name, 14, u.fg, true), Ui.weight(1));
+            r.addView(u.text(Analyzer.fmt(e.cpuAvg) + "%", 13, u.dim, false));
+            r.setOnClickListener(v -> {
+                s.dismiss();
+                runProfile(String.valueOf(mainPid(e)), name);
+            });
+            s.add(r);
+        }
+        s.action("取消", Sheet.NORMAL, null).show();
+    }
+
+    private void runProfile(String target, String label) {
+        Sheet wait = new Sheet(this, u).cancelable(false)
+                .title("正在深度分析…", "正在对「" + label + "」采样约 12 秒，随后解析调用栈，一般需要 20～60 秒。"
+                        + "期间实时数据暂停刷新。");
+        ProgressBar bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        bar.setIndeterminate(true);
+        bar.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(u.accent));
+        wait.add(bar, Ui.lp(-1, -2, 0, u.dp(16), 0, u.dp(4)));
+        wait.show();
+        mon.call("PROFILE " + target + " 12", r -> {
+            wait.dismiss();
+            if (!r.optBoolean("ok")) {
+                new Sheet(this, u).title("深度分析失败", null)
+                        .add(u.note(r.optString("error"), u.bad), Ui.lp(-1, -2, 0, u.dp(12), 0, 0))
+                        .action("好", Sheet.PRIMARY, null).show();
+                return;
+            }
+            showProfile(r, label);
+        });
+    }
+
+    private void showProfile(JSONObject r, String label) {
+        double procCpu = r.optDouble("procCpu", -1);
+        String sub = "采样 " + r.optInt("seconds") + " 秒 · " + r.optLong("samples") + " 个样本"
+                + (procCpu >= 0 ? " · 期间进程平均占用 " + Analyzer.fmt(procCpu) + "%（单核）" : "");
+        Sheet s = new Sheet(this, u).title("深度分析 · " + label, sub);
+
+        JSONArray mods = r.optJSONArray("modules");
+        s.section("LSPosed 模块（占该进程 CPU 的比例）");
+        if (mods == null || mods.length() == 0) {
+            s.add(u.note("采样期间没有发现任何模块的代码在运行，说明这段时间该进程的占用基本来自系统自身。", u.good));
+        } else {
+            for (int i = 0; i < mods.length(); i++) {
+                JSONObject m = mods.optJSONObject(i);
+                String pkg = m.optString("pkg");
+                Entity fake = new Entity();
+                fake.type = Analyzer.LSP;
+                fake.pkg = pkg;
+                fake.title = pkg;
+                double pct = m.optDouble("pct");
+                List<String> methods = new ArrayList<>();
+                JSONArray ms = m.optJSONArray("methods");
+                if (ms != null) for (int k = 0; k < ms.length() && k < 3; k++) {
+                    JSONObject mo = ms.optJSONObject(k);
+                    methods.add(Analyzer.fmt(mo.optDouble("pct")) + "%  " + mo.optString("name"));
+                }
+                s.add(shareRow(fake, u.label(fake), pct, procCpu, pct >= 10 ? u.bad : pct >= 3 ? u.warn : u.accent, methods));
+            }
+        }
+        double bridge = r.optDouble("bridge"), amb = r.optDouble("ambiguous"), sys = r.optDouble("system");
+        if (bridge > 0) s.add(shareRow(null, "LSPosed 框架转发", bridge, procCpu, u.dim, null));
+        if (amb > 0) {
+            List<String> d = new ArrayList<>();
+            JSONArray ad = r.optJSONArray("ambiguousDetail");
+            if (ad != null) for (int i = 0; i < ad.length(); i++) {
+                JSONObject o = ad.optJSONObject(i);
+                d.add(Analyzer.fmt(o.optDouble("pct")) + "%  " + o.optString("modules"));
+            }
+            s.add(shareRow(null, "无法区分（多个模块共有的代码）", amb, procCpu, u.warn, d));
+        }
+        s.add(shareRow(null, "系统自身", sys, procCpu, u.good, null));
+
+        JSONArray sm = r.optJSONArray("systemMethods");
+        if (sm != null && sm.length() > 0) {
+            s.section("系统自身最耗时的方法");
+            s.add(listBox(sm, 6));
+        }
+        JSONArray th = r.optJSONArray("threads");
+        if (th != null && th.length() > 0) {
+            s.section("最忙的线程");
+            s.add(listBox(th, 5));
+        }
+        if (r.optDouble("javaFrames", 100) < 30) {
+            s.add(u.note("大部分样本没有解析出 Java 方法名，模块归属可能不完整。", u.warn), Ui.lp(-1, -2, 0, u.dp(14), 0, 0));
+        }
+        s.add(u.note("比例是采样期间该进程 CPU 时间里各部分的占比；「≈单核」= 进程平均占用 × 比例。"
+                + "hook 带来的间接开销（如被 hook 的方法无法内联）统计不到，结果会略微低估模块的影响。", u.dim),
+                Ui.lp(-1, -2, 0, u.dp(14), 0, 0));
+        s.action("好", Sheet.PRIMARY, null).show();
+    }
+
+    /** 深度分析结果的一行：名称、占比、约合单核占用、比例条，以及可选的明细。 */
+    private View shareRow(Entity e, String name, double pct, double procCpu, int color, List<String> details) {
+        LinearLayout box = u.col();
+        box.setPadding(u.dp(12), u.dp(10), u.dp(12), u.dp(10));
+        box.setBackground(Ui.round(u.sunken, u.dp(14)));
+        LinearLayout r = u.row();
+        if (e != null) {
+            FrameLayout av = u.avatar(32);
+            u.bindAvatar(av, e, name);
+            r.addView(av, Ui.lp(u.dp(32), u.dp(32), 0, 0, u.dp(10), 0));
+        }
+        TextView n = u.text(name, 14, u.fg, true);
+        n.setSingleLine(true);
+        n.setEllipsize(TextUtils.TruncateAt.END);
+        r.addView(n, Ui.weight(1));
+        LinearLayout vc = u.col();
+        vc.setGravity(Gravity.END);
+        TextView v = u.text(Analyzer.fmt(pct) + "%", 16, color == u.dim ? u.fg : color, true);
+        v.setFontFeatureSettings("tnum");
+        vc.addView(v);
+        if (procCpu >= 0) vc.addView(u.text("≈" + Analyzer.fmt(procCpu * pct / 100) + "% 单核", 10, u.dim, false));
+        r.addView(vc, Ui.lp(-2, -2, u.dp(8), 0, 0, 0));
+        box.addView(r);
+        Ui.Bar bar = new Ui.Bar(this, u.track);
+        bar.set((float) (pct / 100), color);
+        box.addView(bar, Ui.lp(-1, u.dp(4), 0, u.dp(8), 0, 0));
+        if (details != null) for (String d : details) {
+            TextView t = u.text(d, 11, u.dim, false);
+            t.setSingleLine(true);
+            t.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+            box.addView(t, Ui.lp(-1, -2, 0, u.dp(4), 0, 0));
+        }
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.addView(box, new LinearLayout.LayoutParams(-1, -2));
+        return wrap;
+    }
+
+    /** {name, pct} 列表。 */
+    private View listBox(JSONArray arr, int max) {
+        LinearLayout box = u.col();
+        box.setPadding(u.dp(12), u.dp(8), u.dp(12), u.dp(8));
+        box.setBackground(Ui.round(u.sunken, u.dp(14)));
+        for (int i = 0; i < arr.length() && i < max; i++) {
+            JSONObject o = arr.optJSONObject(i);
+            LinearLayout r = u.row();
+            TextView n = u.text(o.optString("name"), 12, u.fg, false);
+            n.setSingleLine(true);
+            n.setEllipsize(TextUtils.TruncateAt.START);
+            r.addView(n, Ui.weight(1));
+            TextView v = u.text(Analyzer.fmt(o.optDouble("pct")) + "%", 12, u.dim, false);
+            v.setFontFeatureSettings("tnum");
+            r.addView(v, Ui.lp(-2, -2, u.dp(8), 0, 0, 0));
+            box.addView(r, Ui.lp(-1, -2, 0, i > 0 ? u.dp(5) : 0, 0, 0));
+        }
+        return box;
     }
 
     // ------------------------------------------------------------------ 一键清理

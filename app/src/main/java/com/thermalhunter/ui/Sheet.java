@@ -120,6 +120,12 @@ final class Sheet {
         return this;
     }
 
+    Sheet cancelable(boolean c) {
+        dialog.setCancelable(c);
+        dialog.setCanceledOnTouchOutside(c);
+        return this;
+    }
+
     void show() {
         actions.setVisibility(actions.getChildCount() == 0 ? View.GONE : View.VISIBLE);
         dialog.show();

@@ -42,6 +42,10 @@ public final class Monitor {
         void onDone(List<String> msgs, boolean allOk);
     }
 
+    public interface Reply {
+        void onReply(JSONObject r);
+    }
+
     // 工作模式：auto = 先试 root，失败再用 Shizuku；root = 仅 root；shizuku = 仅 Shizuku（ADB）
     public static final String[] MODES = {"auto", "root", "shizuku"};
 
@@ -139,6 +143,15 @@ public final class Monitor {
             }
             final boolean fOk = allOk;
             ui.post(() -> done.onDone(msgs, fOk));
+            kick();
+        });
+    }
+
+    /** 执行一条命令并把原始 JSON 结果交回主线程（用于深度分析等耗时操作，期间实时采样暂停）。 */
+    public void call(String cmd, Reply reply) {
+        bg.post(() -> {
+            JSONObject r = root.safeCall(cmd);
+            ui.post(() -> reply.onReply(r));
             kick();
         });
     }

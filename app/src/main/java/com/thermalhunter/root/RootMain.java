@@ -69,7 +69,7 @@ public final class RootMain {
 
     /** 以 shell 身份运行时（Shizuku 模式）没有权限执行的命令前缀。 */
     private static boolean needsRoot(String cmd) {
-        return cmd.startsWith("KSU_") || cmd.startsWith("LSP_");
+        return cmd.startsWith("KSU_") || cmd.startsWith("LSP_") || cmd.equals("PROFILE");
     }
 
     private static JSONObject handle(String[] a, Scanner s, Actions act) throws Exception {
@@ -100,6 +100,8 @@ public final class RootMain {
                 return act.setLspEnabled(strArg(a, 1), false);
             case "LSP_ENABLE":
                 return act.setLspEnabled(strArg(a, 1), true);
+            case "PROFILE": // PROFILE <pid 或进程名> <秒数>
+                return Profiler.run(strArg(a, 1), intArg(a, 2, 12));
             case "REBOOT":
                 return act.reboot();
             case "PING": {
