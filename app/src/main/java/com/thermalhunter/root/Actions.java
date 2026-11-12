@@ -79,6 +79,7 @@ final class Actions {
             Os.kill(pid, 9);
             return ok("已杀死 " + name + " (" + pid + ")");
         } catch (Throwable e) {
+            if (Os.getuid() != 0) return fail("Shizuku 模式没有权限杀死 " + name + "（需要 root）");
             return fail("kill 失败: " + e);
         }
     }

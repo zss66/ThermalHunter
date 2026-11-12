@@ -4,6 +4,8 @@ import android.content.Context;
 
 import org.json.JSONObject;
 
+import rikka.shizuku.ShizukuRemoteProcess;
+
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
@@ -12,7 +14,7 @@ import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 
 /**
- * 通过 su 启动常驻 root 进程（app_process 运行本 APK 内的 RootMain），
+ * 通过 su（root 模式）或 Shizuku（ADB 模式，shell 身份）启动常驻进程（app_process 运行本 APK 内的 RootMain），
  * 后续所有采集/操作都通过 stdin/stdout 的行协议完成，避免每次都 fork shell。
  * 所有调用都必须在后台线程。
  */
@@ -21,9 +23,17 @@ public final class RootSession {
     private BufferedWriter writer;
     private BufferedReader reader;
     private volatile String lastError = "";
+    private volatile boolean viaShizuku;
 
     public synchronized boolean isAlive() {
         if (process == null) return false;
+        if (process instanceof ShizukuRemoteProcess) {
+            try {
+                return ((ShizukuRemoteProcess) process).alive();
+            } catch (RuntimeException e) {
+                return false; // Shizuku 服务已断开
+            }
+        }
         try {
             process.exitValue();
             return false;
@@ -32,15 +42,23 @@ public final class RootSession {
         }
     }
 
+    /** 当前会话是否通过 Shizuku（shell 权限）建立。 */
+    public boolean isShizuku() {
+        return viaShizuku;
+    }
+
     public String lastError() {
         return lastError;
     }
 
-    public synchronized boolean start(Context ctx) {
+    /** @param shizuku true 时通过 Shizuku 以 shell 身份启动，否则通过 su 以 root 启动 */
+    public synchronized boolean start(Context ctx, boolean shizuku) {
         close();
+        viaShizuku = shizuku;
+        lastError = "";
         String apk = ctx.getApplicationInfo().sourceDir;
         try {
-            process = new ProcessBuilder("su").start();
+            process = shizuku ? ShizukuShell.newProcess("sh") : new ProcessBuilder("su").start();
             writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
             reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
             final Process p = process;
@@ -62,11 +80,12 @@ public final class RootSession {
             while ((line = reader.readLine()) != null) {
                 if (line.equals("@@READY")) return true;
             }
-            if (lastError.isEmpty()) lastError = "su 被拒绝或不可用（请在 KernelSU 管理器中授予本应用超级用户权限）";
+            if (lastError.isEmpty()) lastError = shizuku ? "后台进程没有启动"
+                    : "su 被拒绝或不可用（请在 KernelSU 管理器中授予本应用超级用户权限）";
             close();
             return false;
         } catch (IOException e) {
-            lastError = "无法执行 su: " + e.getMessage();
+            lastError = (shizuku ? "无法通过 Shizuku 启动: " : "无法执行 su: ") + e.getMessage();
             close();
             return false;
         }
@@ -117,7 +136,10 @@ public final class RootSession {
             writer.close();
         } catch (Exception ignored) {
         }
-        process.destroy();
+        try {
+            process.destroy();
+        } catch (Exception ignored) {
+        }
         process = null;
         writer = null;
         reader = null;

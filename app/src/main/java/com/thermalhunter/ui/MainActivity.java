@@ -25,6 +25,8 @@ import android.widget.CheckBox;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -32,9 +34,11 @@ import com.thermalhunter.core.Analyzer;
 import com.thermalhunter.core.Analyzer.Entity;
 import com.thermalhunter.core.ModuleStatus;
 import com.thermalhunter.core.RootSession;
+import com.thermalhunter.core.ShizukuShell;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+import rikka.shizuku.Shizuku;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -55,6 +59,17 @@ public class MainActivity extends Activity {
     private volatile boolean running;
     private Analyzer.Result result;
     private int tab;
+
+    // 工作模式：auto = 先试 root，失败再用 Shizuku；root = 仅 root；shizuku = 仅 Shizuku（ADB）
+    private static final String[] MODES = {"auto", "root", "shizuku"};
+    private static final String[] MODE_NAMES = {"自动（优先 root，没有则用 Shizuku）", "仅 root（KernelSU）", "仅 Shizuku（无线调试 / ADB）"};
+    private volatile boolean rootFailed;   // auto 模式下 root 已失败，本次不再反复申请
+    private volatile boolean shizukuAsked; // 本次可见期间已弹过 Shizuku 授权
+    private final Runnable tickR = this::tick;
+    private final Shizuku.OnBinderReceivedListener binderListener = this::kick;
+    private final Shizuku.OnRequestPermissionResultListener permListener = (code, res) -> {
+        if (code == ShizukuShell.REQUEST_CODE) kick();
+    };
 
     private SharedPreferences prefs;
     private Palette c;
@@ -80,13 +95,23 @@ public class MainActivity extends Activity {
         worker = new HandlerThread("root-worker");
         worker.start();
         bg = new Handler(worker.getLooper());
+        Shizuku.addBinderReceivedListenerSticky(binderListener);
+        Shizuku.addRequestPermissionResultListener(permListener);
+    }
+
+    /** Shizuku 就绪或授权结果返回时立即重连，不等 5 秒重试。 */
+    private void kick() {
+        if (!running) return;
+        bg.removeCallbacks(tickR);
+        bg.post(tickR);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         running = true;
-        bg.post(this::tick);
+        shizukuAsked = false;
+        bg.post(tickR);
     }
 
     @Override
@@ -99,6 +124,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        Shizuku.removeBinderReceivedListener(binderListener);
+        Shizuku.removeRequestPermissionResultListener(permListener);
         bg.post(() -> {
             root.close();
             worker.quitSafely();
@@ -109,11 +136,10 @@ public class MainActivity extends Activity {
     private void tick() {
         if (!running) return;
         if (!root.isAlive()) {
-            ui.post(() -> banner("正在获取 root 权限…", c.warn));
-            if (!root.start(this)) {
-                String err = root.lastError();
-                ui.post(() -> banner("❌ 未获得 root：" + err + "\n请在 KernelSU 管理器 → 超级用户 中允许「热源猎手」，然后重新打开。", c.bad));
-                bg.postDelayed(this::tick, 5000);
+            String err = connect();
+            if (err != null) {
+                ui.post(() -> banner(err, c.bad));
+                bg.postDelayed(tickR, 5000);
                 return;
             }
         }
@@ -125,7 +151,43 @@ public class MainActivity extends Activity {
             String err = snap.optString("error");
             ui.post(() -> banner("采集失败：" + err, c.bad));
         }
-        if (running) bg.postDelayed(this::tick, INTERVAL_MS);
+        if (running) bg.postDelayed(tickR, INTERVAL_MS);
+    }
+
+    /** 按工作模式建立后台会话；成功返回 null，失败返回给用户看的说明。在 bg 线程执行。 */
+    private String connect() {
+        String mode = prefs.getString("work_mode", "auto");
+        String rootErr = null;
+        if (mode.equals("root") || (mode.equals("auto") && !rootFailed)) {
+            ui.post(() -> banner("正在获取 root 权限…", c.warn));
+            if (root.start(this, false)) return null;
+            rootErr = root.lastError();
+            if (mode.equals("root")) {
+                return "❌ 未获得 root：" + rootErr + "\n请在 KernelSU 管理器 → 超级用户 中允许「热源猎手」，然后重新打开。";
+            }
+            rootFailed = true;
+        } else if (mode.equals("auto")) {
+            rootErr = "未授予";
+        }
+        String why = ShizukuShell.unavailableReason();
+        if (why == null && !ShizukuShell.granted()) {
+            if (ShizukuShell.permanentlyDenied()) {
+                why = "Shizuku 授权已被拒绝：请在 Shizuku → 授权应用管理 中允许「热源猎手」";
+            } else {
+                if (!shizukuAsked) {
+                    shizukuAsked = true;
+                    ui.post(ShizukuShell::request);
+                }
+                why = "请在弹出的 Shizuku 对话框中允许「热源猎手」";
+            }
+        }
+        if (why == null) {
+            ui.post(() -> banner("正在通过 Shizuku 启动…", c.warn));
+            if (root.start(this, true)) return null;
+            why = "Shizuku 启动采集进程失败：" + root.lastError();
+        }
+        if (rootErr != null) return "❌ 未获得 root：" + rootErr + "\n❌ " + why;
+        return "❌ " + why;
     }
 
     // ------------------------------------------------------------------ 布局
@@ -236,7 +298,8 @@ public class MainActivity extends Activity {
         JSONObject dev = s.optJSONObject("device");
         if (dev != null) {
             headDevice.setText(dev.optString("model") + " · " + dev.optString("soc") + " · Android "
-                    + dev.optString("android") + "\n内核 " + dev.optString("kernel") + " · " + s.optString("rootImpl"));
+                    + dev.optString("android") + "\n内核 " + dev.optString("kernel") + " · "
+                    + ("shell".equals(s.optString("mode")) ? "Shizuku（shell 权限）" : s.optString("rootImpl")));
         }
         StringBuilder t = new StringBuilder();
         if (r.maxTemp > -999) t.append("SoC ").append(Analyzer.fmt(r.maxTemp)).append("°C");
@@ -273,14 +336,17 @@ public class MainActivity extends Activity {
         headLoad.setText(load.toString().trim());
 
         List<String> notes = new ArrayList<>();
-        if (!ModuleStatus.isActive()) {
+        if ("shell".equals(s.optString("mode"))) {
+            notes.add("ℹ Shizuku 模式：可查看温度、功耗、进程排行，可强行停止 / 停用应用；"
+                    + "KSU / LSP 模块、应用唤醒统计、杀死其他进程需要 root。");
+        } else if (!ModuleStatus.isActive()) {
             notes.add("⚠ LSPosed 模块未激活：在 LSPosed 中启用本模块并勾选「系统框架」后重启，才能统计应用唤醒锁/闹钟。");
         } else if (!r.hookOk) {
             notes.add(r.hookAgeSec < 0 ? "⚠ 模块已激活，但系统框架 hook 未生效（作用域需勾选「系统框架」并重启）"
                     : "⚠ 唤醒统计数据已过期 " + r.hookAgeSec + " 秒");
         }
         JSONObject lsp = s.optJSONObject("lsp");
-        if (lsp != null && !lsp.optBoolean("available") && lsp.has("error")) notes.add("LSPosed：" + lsp.optString("error"));
+        if (!"shell".equals(s.optString("mode")) && lsp != null && !lsp.optBoolean("available") && lsp.has("error")) notes.add("LSPosed：" + lsp.optString("error"));
         if (notes.isEmpty()) banner.setVisibility(View.GONE);
         else banner(TextUtils.join("\n", notes), c.warn);
 
@@ -508,6 +574,7 @@ public class MainActivity extends Activity {
         boolean includeFg = prefs.getBoolean("clean_foreground", false);
         boolean disableModules = prefs.getBoolean("clean_disable_modules", false);
         List<Entity> targets = Analyzer.cleanTargets(result, includeFg);
+        boolean shell = "shell".equals(result.snap.optString("mode"));
         if (targets.isEmpty()) {
             Toast.makeText(this, "当前没有检测到异常对象 👍", Toast.LENGTH_SHORT).show();
             return;
@@ -524,8 +591,12 @@ public class MainActivity extends Activity {
                     cmds.add("FORCESTOP " + e.pkg + " " + e.user);
                     break;
                 case Analyzer.NATIVE:
-                    sb.append("杀死进程");
-                    cmds.addAll(killCmds(e));
+                    if (shell) {
+                        sb.append("跳过（Shizuku 模式无权杀死，需要 root）");
+                    } else {
+                        sb.append("杀死进程");
+                        cmds.addAll(killCmds(e));
+                    }
                     break;
                 case Analyzer.KSU:
                     if (disableModules) {
@@ -564,6 +635,22 @@ public class MainActivity extends Activity {
         CheckBox dm = new CheckBox(this);
         dm.setText("一键清理时直接禁用异常的 KSU / LSP 模块（否则只杀进程）");
         dm.setChecked(prefs.getBoolean("clean_disable_modules", false));
+        TextView modeTitle = text("工作模式", 14, c.fg, true);
+        box.addView(modeTitle);
+        RadioGroup modeGroup = new RadioGroup(this);
+        String curMode = prefs.getString("work_mode", "auto");
+        for (int i = 0; i < MODES.length; i++) {
+            RadioButton rb = new RadioButton(this);
+            rb.setId(i + 1);
+            rb.setText(MODE_NAMES[i]);
+            rb.setChecked(MODES[i].equals(curMode));
+            modeGroup.addView(rb);
+        }
+        box.addView(modeGroup);
+        TextView modeNote = text("Shizuku 模式无需 root：先安装 Shizuku 并通过「无线调试」启动它，"
+                + "本应用会以 shell 权限工作（模块管理与杀进程不可用）。", 12, c.dim, false);
+        modeNote.setPadding(0, 0, 0, dp(8));
+        box.addView(modeNote);
         box.addView(fg);
         box.addView(dm);
         TextView note = text("判定规则（单核 CPU%，约 15 秒平均）：\n"
@@ -574,9 +661,23 @@ public class MainActivity extends Activity {
         note.setPadding(0, dp(12), 0, 0);
         box.addView(note);
         new AlertDialog.Builder(this).setTitle("设置").setView(box)
-                .setPositiveButton("保存", (d, w) -> prefs.edit()
-                        .putBoolean("clean_foreground", fg.isChecked())
-                        .putBoolean("clean_disable_modules", dm.isChecked()).apply())
+                .setPositiveButton("保存", (d, w) -> {
+                    int idx = modeGroup.getCheckedRadioButtonId() - 1;
+                    String newMode = idx >= 0 && idx < MODES.length ? MODES[idx] : curMode;
+                    prefs.edit()
+                            .putBoolean("clean_foreground", fg.isChecked())
+                            .putBoolean("clean_disable_modules", dm.isChecked())
+                            .putString("work_mode", newMode).apply();
+                    if (!newMode.equals(curMode)) {
+                        // 切换模式：关闭当前会话，下次采样按新模式重连
+                        bg.post(() -> {
+                            rootFailed = false;
+                            shizukuAsked = false;
+                            root.close();
+                        });
+                        kick();
+                    }
+                })
                 .setNeutralButton("重启手机", (d, w) -> confirm("立即重启手机？（模块禁用需重启才能完全生效）", () -> run("REBOOT")))
                 .setNegativeButton("取消", null).show();
     }

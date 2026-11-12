@@ -1,6 +1,6 @@
 # 热源猎手 ThermalHunter
 
-一个 Android 工具，用来找出让手机发热、耗电的元凶。需要 root（KernelSU），并作为 LSPosed 模块工作。首个适配机型为 **iQOO Z10 Turbo+（天玑，GKI 6.6 内核）**，其他联发科 / 高通机型理论上也能用。
+一个 Android 工具，用来找出让手机发热、耗电的元凶。推荐 root（KernelSU）+ LSPosed 模块；没有 root 时也可以通过 **Shizuku（无线调试 / ADB）** 以 shell 权限运行基础功能。首个适配机型为 **iQOO Z10 Turbo+（天玑，GKI 6.6 内核）**，其他联发科 / 高通机型理论上也能用。
 
 ## 功能
 
@@ -14,10 +14,24 @@
 | 一键清理 | 强行停止异常应用、杀死异常进程和模块进程；可在设置中开启"直接**禁用**异常的 KSU / LSP 模块" |
 | 单项操作 | 应用：强行停止 / 停用（冻结）/ 重新启用；进程：杀死；KSU 模块：禁用 / 启用（优先 `ksud module disable`，失败则写 `disable` 标记文件）；LSP 模块：禁用 / 启用 |
 
+## 工作模式
+
+设置 → 工作模式：**自动**（默认，优先 root，没有则用 Shizuku）/ 仅 root / 仅 Shizuku。
+
+| 功能 | root 模式 | Shizuku 模式（shell 权限） |
+|---|---|---|
+| 温度、功耗、CPU/GPU 频率、进程排行 | ✅ | ✅ |
+| 强行停止 / 停用（冻结）应用 | ✅ | ✅ |
+| 杀死 native 进程 / 其他应用进程 | ✅ | ❌ |
+| KSU 模块、LSP 模块扫描与禁用 | ✅ | ❌ |
+| 应用唤醒锁 / 闹钟统计（LSPosed hook） | ✅ | ❌ |
+
+Shizuku 模式用法：安装 [Shizuku](https://shizuku.rikka.app/)，在开发者选项中开启「无线调试」，在 Shizuku 中通过无线调试配对并启动服务；打开本应用后在弹窗中允许授权。手机重启后需要在 Shizuku 中重新启动服务。
+
 ## 架构
 
 ```
-App 界面 (MainActivity)  ──stdin/stdout 行协议──▶  root 常驻进程（su + app_process 运行本 APK 内的 RootMain）
+App 界面 (MainActivity)  ──stdin/stdout 行协议──▶  常驻进程（su 或 Shizuku + app_process 运行本 APK 内的 RootMain）
    │                                                 ├─ Scanner：/proc、温度、电池、cpufreq、GED、唤醒源
    │                                                 ├─ KsuModules：模块扫描 + 进程归属
    │                                                 ├─ LspModules：用 SQLite 读写 LSPosed 配置库

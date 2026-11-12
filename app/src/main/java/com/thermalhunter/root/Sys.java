@@ -88,6 +88,11 @@ final class Sys {
 
     /** 直接 exec（不经过 shell，杜绝注入）。返回 [exitCode, output]。 */
     static Object[] exec(String... argv) {
+        return execMax(65536, argv);
+    }
+
+    /** 同 exec，但允许更长的输出（如 pm list packages）。 */
+    static Object[] execMax(int max, String... argv) {
         try {
             Process p = new ProcessBuilder(argv).redirectErrorStream(true).start();
             p.getOutputStream().close();
@@ -95,7 +100,7 @@ final class Sys {
             InputStream in = p.getInputStream();
             byte[] b = new byte[4096];
             int n;
-            while ((n = in.read(b)) > 0) if (bos.size() < 65536) bos.write(b, 0, n);
+            while ((n = in.read(b)) > 0) if (bos.size() < max) bos.write(b, 0, n);
             int code = p.waitFor();
             return new Object[]{code, bos.toString("UTF-8").trim()};
         } catch (Throwable e) {

@@ -1,5 +1,7 @@
 package com.thermalhunter.root;
 
+import android.system.Os;
+
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
@@ -10,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 /**
  * root 端常驻进程入口，由 App 通过以下方式启动：
  *   su -c 'CLASSPATH=<apk> exec app_process /system/bin com.thermalhunter.root.RootMain'
+ * 也可通过 Shizuku 以 shell 身份（uid 2000）启动，此时模块相关操作不可用。
  * 协议：stdin 每行一条命令，stdout 每行一个以 "@@" 开头的 JSON 响应。
  * stdin 关闭（App 退出）时进程自动结束，不会残留后台耗电。
  */
@@ -64,7 +67,18 @@ public final class RootMain {
         return a.length > i ? a[i] : "";
     }
 
+    /** 以 shell 身份运行时（Shizuku 模式）没有权限执行的命令前缀。 */
+    private static boolean needsRoot(String cmd) {
+        return cmd.startsWith("KSU_") || cmd.startsWith("LSP_");
+    }
+
     private static JSONObject handle(String[] a, Scanner s, Actions act) throws Exception {
+        if (Os.getuid() != 0 && needsRoot(a[0])) {
+            JSONObject o = new JSONObject();
+            o.put("ok", false);
+            o.put("error", "Shizuku 模式下不可用（需要 root）");
+            return o;
+        }
         switch (a[0]) {
             case "SNAPSHOT":
                 return s.snapshot();

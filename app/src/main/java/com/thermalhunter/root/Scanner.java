@@ -63,6 +63,7 @@ final class Scanner {
         if (now - pkgListTime < 60_000 && !allPkgs.isEmpty()) return;
         pkgListTime = now;
         String s = Sys.readAll("/data/system/packages.list", 4 << 20);
+        if (s == null) s = pmPackageList(); // shell 身份（Shizuku 模式）读不到 packages.list
         if (s == null) return;
         Map<Integer, List<String>> map = new HashMap<>();
         Set<String> all = new HashSet<>();
@@ -82,6 +83,24 @@ final class Scanner {
         allPkgs = all;
     }
 
+    /** 用 pm 生成与 packages.list 相同的「包名 appId」格式。 */
+    private static String pmPackageList() {
+        Object[] r = Sys.execMax(4 << 20, "pm", "list", "packages", "-U");
+        if ((int) r[0] != 0) return null;
+        StringBuilder sb = new StringBuilder();
+        for (String line : String.valueOf(r[1]).split("\n")) {
+            line = line.trim();
+            int u = line.indexOf(" uid:");
+            if (!line.startsWith("package:") || u < 0) continue;
+            String uid = line.substring(u + 5).split("[,\\s]")[0];
+            try {
+                sb.append(line, 8, u).append(' ').append(Integer.parseInt(uid) % 100000).append('\n');
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return sb.toString();
+    }
+
     // ------------------------------------------------------------------ snapshot
 
     JSONObject snapshot() throws Exception {
@@ -90,6 +109,7 @@ final class Scanner {
         out.put("ok", true);
         out.put("t", SystemClock.elapsedRealtime());
         out.put("ncpu", ncpu);
+        out.put("mode", Os.getuid() == 0 ? "root" : "shell");
         out.put("device", device());
 
         // 总 CPU
