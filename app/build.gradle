@@ -12,11 +12,29 @@ android {
         versionName '1.0.0'
     }
 
+    // 固定签名：从环境变量或 keystore.properties 读取；都没有时回退到 debug 签名
+    def ksProps = new Properties()
+    def ksPropsFile = rootProject.file('keystore.properties')
+    if (ksPropsFile.exists()) ksPropsFile.withInputStream { ksProps.load(it) }
+    def ksValue = { String envKey, String propKey -> System.getenv(envKey) ?: ksProps.getProperty(propKey) }
+    def ksFile = ksValue('SIGNING_STORE_FILE', 'storeFile')
+
+    signingConfigs {
+        if (ksFile) {
+            release {
+                storeFile file(ksFile)
+                storePassword ksValue('SIGNING_STORE_PASSWORD', 'storePassword')
+                keyAlias ksValue('SIGNING_KEY_ALIAS', 'keyAlias')
+                keyPassword ksValue('SIGNING_KEY_PASSWORD', 'keyPassword')
+            }
+        }
+    }
+
     buildTypes {
         release {
             // 不要混淆：LSPosed 通过类名加载入口，root 端通过 app_process 反射启动
             minifyEnabled false
-            signingConfig signingConfigs.debug
+            signingConfig ksFile ? signingConfigs.release : signingConfigs.debug
         }
     }
     compileOptions {

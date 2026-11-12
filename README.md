@@ -36,7 +36,7 @@ LSPosed（作用域：系统框架）── HookEntry hook system_server ──�
 ```bash
 echo "sdk.dir=/你的/android-sdk" > local.properties
 ./gradlew :app:assembleRelease        # 或直接用 Android Studio 打开
-# 产物：app/build/outputs/apk/release/app-release.apk（使用 debug 签名）
+# 产物：app/build/outputs/apk/release/app-release.apk
 ```
 
 ## 使用
@@ -58,3 +58,16 @@ echo "sdk.dir=/你的/android-sdk" > local.properties
 - 禁用 KSU 模块会立即杀死其进程，但它挂载的文件和 `system.prop` 修改要重启后才会撤销。
 - 单个应用的功耗是**按 CPU 占比分摊**的估算值；充电时不显示功耗估算。
 - iQOO Z10 Turbo+ 的温度传感器名称尚未在真机上确认。App 把名称含 `soc/cpu/mtktscpu/gpu/apu` 的当作 SoC 温度，含 `shell/skin/board/ap_ntc` 的当作机身温度。如果读数不对，把 `cat /sys/class/thermal/thermal_zone*/type` 的输出发给我，用来调整 `Analyzer.isSocZone`。
+
+### 签名
+
+release 包使用固定签名。本地编译时在项目根目录放一个 `keystore.properties`（已被 git 忽略）：
+
+```properties
+storeFile=/path/to/release.jks
+storePassword=...
+keyAlias=thermalhunter
+keyPassword=...
+```
+
+没有这个文件时回退为 debug 签名。GitHub Actions 从仓库 Secrets 读取：`KEYSTORE_BASE64`、`KEYSTORE_PASSWORD`、`KEY_ALIAS`、`KEY_PASSWORD`。
