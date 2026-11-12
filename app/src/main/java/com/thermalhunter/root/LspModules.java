@@ -16,6 +16,8 @@ import java.util.Map;
  *   modules(mid, module_pkg_name, apk_path, enabled, ...)
  *   scope(mid, app_pkg_name, user_id)        —— 系统框架在库中记为 "system"
  * 各分支列名不完全一致（例如没有 mid 列），因此先读表结构再按实际列名查询。
+ * 新分支把启用状态拆到单独的表，并按用户记录:
+ *   modules(module_pkg_name, apk_path) + modules_state(module_pkg_name, user_id, enabled, ...)
  * 直接改库后 lspd 的内存缓存不会刷新，需重启手机才能完全生效。
  */
 final class LspModules {
@@ -93,6 +95,25 @@ final class LspModules {
                     r.modules.add(m);
                 }
             }
+            if (sc.state != null) {
+                // 启用状态在单独的表里：优先取主用户 (0)，否则任一用户启用即视为启用；没有记录视为未启用
+                Map<String, Boolean> user0 = new HashMap<>(), any = new HashMap<>();
+                String q = "SELECT " + sc.stPkg + ", " + (sc.stUser == null ? "0" : sc.stUser) + ", " + sc.stEnabled
+                        + " FROM " + sc.state;
+                try (Cursor c = db.rawQuery(q, null)) {
+                    while (c.moveToNext()) {
+                        String pkg = c.getString(0);
+                        boolean en = c.getInt(2) != 0;
+                        if (c.getInt(1) == 0) user0.put(pkg, en);
+                        any.put(pkg, en || Boolean.TRUE.equals(any.get(pkg)));
+                    }
+                }
+                for (Module m : r.modules) {
+                    Boolean v = user0.get(m.pkg);
+                    if (v == null) v = any.get(m.pkg);
+                    m.enabled = v != null && v;
+                }
+            }
             if (sc.scope != null) {
                 String ssql = "SELECT " + sc.sKey + ", " + sc.sApp + ", " + (sc.sUser == null ? "0" : sc.sUser)
                         + " FROM " + sc.scope;
@@ -127,13 +148,27 @@ final class LspModules {
                     SQLiteDatabase.OPEN_READWRITE | SQLiteDatabase.NO_LOCALIZED_COLLATORS);
             Schema sc = schema(db);
             if (sc.error != null) return sc.error;
-            if (sc.mEnabled == null) {
+            if (sc.mEnabled != null) {
+                ContentValues cv = new ContentValues();
+                cv.put(sc.mEnabled, enabled ? 1 : 0);
+                int n = db.update(sc.modules, cv, sc.mPkg + " = ?", new String[]{pkg});
+                if (n == 0) return "数据库中没有该模块: " + pkg;
+            } else if (sc.state != null) {
+                // 按用户记录的启用状态：更新该模块所有用户的记录；启用时若没有记录则为主用户新建一条
+                ContentValues cv = new ContentValues();
+                cv.put(sc.stEnabled, enabled ? 1 : 0);
+                int n = db.update(sc.state, cv, sc.stPkg + " = ?", new String[]{pkg});
+                if (n == 0) {
+                    if (!enabled) return null; // 没有记录本来就是未启用
+                    ContentValues ins = new ContentValues();
+                    ins.put(sc.stPkg, pkg);
+                    if (sc.stUser != null) ins.put(sc.stUser, 0);
+                    ins.put(sc.stEnabled, 1);
+                    if (db.insert(sc.state, null, ins) < 0) return "写入 LSPosed 启用状态失败";
+                }
+            } else {
                 return "暂不支持这个 LSPosed 版本的禁用操作（找不到启用状态列）。请把这条信息截图反馈：\n" + describe(db);
             }
-            ContentValues cv = new ContentValues();
-            cv.put(sc.mEnabled, enabled ? 1 : 0);
-            int n = db.update(sc.modules, cv, sc.mPkg + " = ?", new String[]{pkg});
-            if (n == 0) return "数据库中没有该模块: " + pkg;
         } catch (Throwable e) {
             return "写入 LSPosed 数据库失败: " + e;
         } finally {
@@ -154,6 +189,7 @@ final class LspModules {
         String error;
         String modules, mKey, mPkg, mApk, mEnabled;
         String scope, sKey, sApp, sUser;
+        String state, stPkg, stUser, stEnabled; // 独立的启用状态表（可为空）
     }
 
     private static List<String> tables(SQLiteDatabase db) {
@@ -227,6 +263,22 @@ final class LspModules {
             }
         }
         if (s.mKey == null) s.mKey = mId != null ? mId : "rowid";
+        if (s.mEnabled == null) {
+            // 在其他表中寻找「包名 + enabled」形式的启用状态表，如 modules_state
+            for (String t : tables) {
+                if (t.equals(s.modules) || t.equals(s.scope)) continue;
+                List<String> cols = columns(db, t);
+                String en = pick(cols, "enabled", "enable", "is_enabled");
+                String pk = pick(cols, "module_pkg_name", "module_package_name", "pkg_name", "package_name");
+                if (en != null && pk != null) {
+                    s.state = t;
+                    s.stEnabled = en;
+                    s.stPkg = pk;
+                    s.stUser = pick(cols, "user_id", "userid", "user");
+                    break;
+                }
+            }
+        }
         return s;
     }
 
