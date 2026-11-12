@@ -127,7 +127,9 @@ final class LspModules {
                     SQLiteDatabase.OPEN_READWRITE | SQLiteDatabase.NO_LOCALIZED_COLLATORS);
             Schema sc = schema(db);
             if (sc.error != null) return sc.error;
-            if (sc.mEnabled == null) return "该 LSPosed 版本的数据库没有 enabled 列，无法修改";
+            if (sc.mEnabled == null) {
+                return "暂不支持这个 LSPosed 版本的禁用操作（找不到启用状态列）。请把这条信息截图反馈：\n" + describe(db);
+            }
             ContentValues cv = new ContentValues();
             cv.put(sc.mEnabled, enabled ? 1 : 0);
             int n = db.update(sc.modules, cv, sc.mPkg + " = ?", new String[]{pkg});
@@ -171,6 +173,17 @@ final class LspModules {
         return l;
     }
 
+    /** 列出所有表及其列，用于反馈未适配的数据库结构。 */
+    private static String describe(SQLiteDatabase db) {
+        StringBuilder sb = new StringBuilder();
+        for (String t : tables(db)) {
+            if (t.startsWith("sqlite_") || t.equals("android_metadata")) continue;
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(t).append(columns(db, t));
+        }
+        return sb.toString();
+    }
+
     private static String pick(List<String> have, String... want) {
         for (String w : want) if (have.contains(w)) return w;
         return null;
@@ -182,7 +195,7 @@ final class LspModules {
         s.modules = pick(tables, "modules", "module");
         s.scope = pick(tables, "scope", "scopes", "module_scope");
         if (s.modules == null) {
-            s.error = "无法识别的 LSPosed 数据库：没有 modules 表（现有表: " + tables + "）";
+            s.error = "无法识别的 LSPosed 数据库：没有 modules 表。表结构：\n" + describe(db);
             return s;
         }
         List<String> mc = columns(db, s.modules);
@@ -190,7 +203,7 @@ final class LspModules {
         s.mApk = pick(mc, "apk_path", "path", "module_apk_path");
         s.mEnabled = pick(mc, "enabled", "enable", "is_enabled");
         if (s.mPkg == null) {
-            s.error = "无法识别的 LSPosed 数据库：" + s.modules + " 表的列为 " + mc;
+            s.error = "无法识别的 LSPosed 数据库。表结构：\n" + describe(db);
             return s;
         }
         String mId = pick(mc, "mid", "module_id", "id", "_id");

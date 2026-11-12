@@ -691,8 +691,10 @@ public class MainActivity extends Activity implements Monitor.Listener {
 
     private void runAll(List<String> cmds) {
         mon.runAll(cmds, (msgs, allOk) -> {
-            if (msgs.size() <= 2) {
-                snack(TextUtils.join("\n", msgs), allOk);
+            String joined = TextUtils.join("\n", msgs);
+            // 短消息用轻提示；多条或较长的错误（如需截图反馈的信息）用面板，不会自动消失
+            if (msgs.size() <= 2 && (allOk || (joined.length() < 60 && !joined.contains("\n")))) {
+                snack(joined, allOk);
                 return;
             }
             int okN = 0;
