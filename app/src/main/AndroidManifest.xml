@@ -52,6 +52,8 @@
         <meta-data android:name="xposedmodule" android:value="true" />
         <meta-data android:name="xposeddescription" android:value="@string/xposed_desc" />
         <meta-data android:name="xposedminversion" android:value="93" />
+        <!-- 让本模块写出的 SharedPreferences 对被 hook 的应用进程可读（VPN 隐身用） -->
+        <meta-data android:name="xposedsharedprefs" android:value="true" />
         <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
     </application>
 </manifest>

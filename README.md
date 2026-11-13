@@ -15,6 +15,7 @@
 | 单项操作 | 应用：强行停止 / 停用（冻结）/ 重新启用；进程：杀死；KSU 模块：禁用 / 启用（优先 `ksud module disable`，失败则写 `disable` 标记文件）；LSP 模块：禁用 / 启用 |
 | 悬浮窗 | 在任意界面上方实时显示温度、功耗和发热最高的 5 个进程 / 应用；可拖动，轻点展开 / 收起；通知栏常驻并可一键关闭，熄屏自动暂停采样 |
 | 模块自动归因 | （root）用系统自带的 simpleperf 每 30 秒低频采样一次注入了模块且在占用 CPU 的进程（system_server、被作用的应用），解析模块 APK 的 dex 类名，按调用栈算出每个 LSPosed 模块实际消耗的 CPU，并据此判定异常；只在界面或悬浮窗开启时运行，可在设置中关闭 |
+| VPN 隐身 | 对所选应用在其进程内让 VPN / 代理检测 API（NetworkCapabilities、NetworkInterface）报告「无 VPN」；需在 LSPosed 作用域里包含这些应用。补齐内核层 vpnhide 模块挡不住的框架 API 检测 |
 
 ## 工作模式
 

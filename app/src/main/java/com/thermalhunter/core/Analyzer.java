@@ -268,7 +268,7 @@ public final class Analyzer {
                     if (e.cpuAvg >= CPU_HIGH) bad(e, "持续高 CPU " + c + "%");
                     else if (e.minAdj >= 900 && e.cpuAvg >= CPU_CACHED) bad(e, "已进入缓存(后台冻结级)仍在占用 CPU " + c + "%");
                     else if (e.minAdj >= 200 && e.cpuAvg >= CPU_BG) bad(e, "后台高 CPU " + c + "%");
-                    if (!e.foreground && e.wlFrac >= WL_FRAC_BAD) bad(e, "后台持有唤醒锁 " + Math.round(e.wlFrac * 100) + "% 时间（阻止深睡）");
+                    if (r.discharging && !e.foreground && e.wlFrac >= WL_FRAC_BAD) bad(e, "后台持有唤醒锁 " + Math.round(e.wlFrac * 100) + "% 时间（阻止深睡）");
                     if (e.alarmsPerMin >= ALARM_PER_MIN_BAD) bad(e, "频繁唤醒系统 " + fmt(e.alarmsPerMin) + " 次/分钟");
                     break;
                 case NATIVE:

@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -59,7 +60,7 @@ public class MainActivity extends Activity implements Monitor.Listener {
     private int tab;
     private boolean pendingFloat;
 
-    private TextView headDevice, modeChip, banner, emptyText, loadSummary, snack;
+    private TextView headDevice, headKernel, modeChip, banner, emptyText, loadSummary, snack;
     private TextView heroLabel, heroTemp, heroTempSub, heroPowerLabel, heroPower, heroPowerSub;
     private LinearLayout hero, clusterRow;
     private ImageView floatBtn;
@@ -138,9 +139,13 @@ public class MainActivity extends Activity implements Monitor.Listener {
         LinearLayout titleCol = u.col();
         titleCol.addView(u.text("热源猎手", 24, u.fg, true));
         headDevice = u.text("正在连接…", 12, u.dim, false);
-        headDevice.setMaxLines(2);
+        headDevice.setSingleLine(true);
         headDevice.setEllipsize(TextUtils.TruncateAt.END);
         titleCol.addView(headDevice);
+        headKernel = u.text("", 11, u.dim, false);
+        headKernel.setSingleLine(true);
+        headKernel.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        titleCol.addView(headKernel);
         top.addView(titleCol, Ui.weight(1));
         modeChip = u.chip("", u.dim);
         top.addView(modeChip, Ui.lp(-2, -2, u.dp(8), 0, 0, 0));
@@ -328,9 +333,8 @@ public class MainActivity extends Activity implements Monitor.Listener {
         chip(mode);
         JSONObject dev = s.optJSONObject("device");
         if (dev != null) {
-            headDevice.setText(dev.optString("model") + " · " + dev.optString("soc") + " · Android "
-                    + dev.optString("android") + "\n内核 " + dev.optString("kernel")
-                    + (shell ? "" : " · " + s.optString("rootImpl")));
+            headDevice.setText(dev.optString("model") + " · " + dev.optString("soc") + " · Android " + dev.optString("android"));
+            headKernel.setText("内核 " + dev.optString("kernel") + (shell ? "" : " · " + s.optString("rootImpl")));
         }
 
         // 温度卡片
@@ -974,6 +978,15 @@ public class MainActivity extends Activity implements Monitor.Listener {
                         + "会额外占用少量 CPU，只在界面或悬浮窗开启时运行",
                 mon.autoProfEnabled(), on -> mon.setAutoProf(on)));
 
+        s.section("VPN 隐身（对所选应用隐藏 VPN 状态）");
+        s.add(navRow("选择要隐身的应用…", vpnHideSummary(), () -> {
+            s.dismiss();
+            openVpnHidePicker();
+        }));
+        s.add(u.note("原理：在所选应用进程里让 VPN / 代理检测 API 报告「无 VPN」。"
+                + "需要在 LSPosed 管理器里把这些应用加入本模块的作用域，并勾选后重启该应用或手机。"
+                + "内核层的 vpnhide 模块只隐藏网络接口，挡不住框架 API 检测，本功能补这一层。", u.dim));
+
         s.section("一键清理");
         s.add(switchRow("同时处理前台应用", "默认只处理后台的异常应用",
                 prefs.getBoolean("clean_foreground", false),
@@ -1029,6 +1042,103 @@ public class MainActivity extends Activity implements Monitor.Listener {
         r.addView(sw, Ui.lp(-2, -2, u.dp(8), 0, 0, 0));
         r.setOnClickListener(v -> sw.toggle());
         return r;
+    }
+
+    // ------------------------------------------------------------------ VPN 隐身
+
+    private SharedPreferences hidePrefs() {
+        return getSharedPreferences("hide", MODE_PRIVATE);
+    }
+
+    private java.util.Set<String> vpnHidePkgs() {
+        return new java.util.HashSet<>(hidePrefs().getStringSet("vpn_pkgs", java.util.Collections.emptySet()));
+    }
+
+    private String vpnHideSummary() {
+        int n = vpnHidePkgs().size();
+        return n == 0 ? "尚未选择任何应用" : "已对 " + n + " 个应用启用";
+    }
+
+    /** 可点击的导航行（右侧箭头），用于打开二级面板。 */
+    private View navRow(String title, String desc, Runnable onClick) {
+        LinearLayout r = u.row();
+        r.setPadding(u.dp(14), u.dp(12), u.dp(14), u.dp(12));
+        r.setBackground(u.ripple(Ui.round(u.sunken, u.dp(14))));
+        LinearLayout c = u.col();
+        c.addView(u.text(title, 15, u.fg, true));
+        TextView d = u.text(desc, 12, u.dim, false);
+        d.setLineSpacing(u.dp(1), 1f);
+        c.addView(d, Ui.lp(-1, -2, 0, u.dp(2), 0, 0));
+        r.addView(c, Ui.weight(1));
+        r.addView(u.text("›", 20, u.dim, true), Ui.lp(-2, -2, u.dp(8), 0, 0, 0));
+        r.setOnClickListener(v -> onClick.run());
+        return r;
+    }
+
+    private void openVpnHidePicker() {
+        snack("正在读取应用列表…", true);
+        new Thread(() -> {
+            PackageManager pm = getPackageManager();
+            List<ApplicationInfo> apps = new ArrayList<>();
+            for (ApplicationInfo ai : pm.getInstalledApplications(0)) {
+                boolean system = (ai.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+                // 显示第三方应用 + 有图标的已更新系统应用；排除自己
+                if ("com.thermalhunter".equals(ai.packageName)) continue;
+                if (system && (ai.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0) continue;
+                apps.add(ai);
+            }
+            apps.sort((a, b) -> pm.getApplicationLabel(a).toString()
+                    .compareToIgnoreCase(pm.getApplicationLabel(b).toString()));
+            java.util.Set<String> selected = vpnHidePkgs();
+            ui.post(() -> showVpnHidePicker(apps, selected));
+        }, "app-list").start();
+    }
+
+    private void showVpnHidePicker(List<ApplicationInfo> apps, java.util.Set<String> selected) {
+        ui.removeCallbacks(hideSnack);
+        snack.setVisibility(View.GONE);
+        PackageManager pm = getPackageManager();
+        java.util.Set<String> working = new java.util.HashSet<>(selected);
+        Sheet s = new Sheet(this, u).title("VPN 隐身", "勾选的应用在运行时将检测不到 VPN（仍需在 LSPosed 作用域里包含它们）");
+        for (ApplicationInfo ai : apps) {
+            String pkg = ai.packageName;
+            String label = pm.getApplicationLabel(ai).toString();
+            LinearLayout r = u.row();
+            r.setPadding(u.dp(12), u.dp(10), u.dp(12), u.dp(10));
+            r.setBackground(Ui.round(u.sunken, u.dp(14)));
+            ImageView icon = new ImageView(this);
+            try {
+                icon.setImageDrawable(pm.getApplicationIcon(ai));
+            } catch (Throwable ignored) {
+            }
+            r.addView(icon, Ui.lp(u.dp(34), u.dp(34), 0, 0, u.dp(10), 0));
+            LinearLayout c = u.col();
+            TextView t = u.text(label, 14, u.fg, true);
+            t.setSingleLine(true);
+            t.setEllipsize(TextUtils.TruncateAt.END);
+            c.addView(t);
+            TextView pt = u.text(pkg, 11, u.dim, false);
+            pt.setSingleLine(true);
+            pt.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+            c.addView(pt);
+            r.addView(c, Ui.weight(1));
+            Switch sw = new Switch(this);
+            sw.setChecked(working.contains(pkg));
+            sw.setOnCheckedChangeListener((b, on) -> {
+                if (on) working.add(pkg);
+                else working.remove(pkg);
+            });
+            r.addView(sw, Ui.lp(-2, -2, u.dp(8), 0, 0, 0));
+            r.setOnClickListener(v -> sw.toggle());
+            s.add(r);
+        }
+        s.action("保存", Sheet.PRIMARY, () -> {
+            hidePrefs().edit().putStringSet("vpn_pkgs", working).apply();
+            snack(working.isEmpty() ? "已清空 VPN 隐身列表"
+                    : "已对 " + working.size() + " 个应用启用，请在 LSPosed 作用域里包含它们并重启该应用", true);
+        });
+        s.action("取消", Sheet.NORMAL, null);
+        s.show();
     }
 
     // ------------------------------------------------------------------ 悬浮窗

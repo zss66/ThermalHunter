@@ -8,15 +8,20 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Set;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
+import de.robv.android.xposed.XSharedPreferences;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
@@ -25,6 +30,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *   - android (system_server)：统计每个应用的 PARTIAL 唤醒锁持有时长与唤醒型闹钟次数，
  *     周期性写入 /data/system/thermalhunter/stats.json，由 root 端读取。
  *   - com.thermalhunter：让 App 知道模块已被 LSPosed 激活。
+ *   - 用户在设置里选择的应用：对其隐藏 VPN 状态（读本模块的世界可读配置决定是否启用）。
  *
  * 原则：任何异常都吞掉，绝不能让 system_server 崩溃。
  */
@@ -52,6 +58,85 @@ public class HookEntry implements IXposedHookLoadPackage {
             Stats.start();
             hookWakeLocks(lpparam.classLoader);
             hookAlarms(lpparam.classLoader);
+            return;
+        }
+        // 普通应用：若用户为它开启了「VPN 隐身」，则对其隐藏 VPN 相关信号
+        if (vpnHideEnabledFor(lpparam.packageName)) {
+            hookVpnHide();
+        }
+    }
+
+    // ---------------------------------------------------------------- VPN 隐身
+
+    /** 读取本模块世界可读的配置，判断某应用是否启用了 VPN 隐身。失败即视为未启用。 */
+    private static boolean vpnHideEnabledFor(String pkg) {
+        try {
+            XSharedPreferences prefs = new XSharedPreferences("com.thermalhunter", "hide");
+            prefs.makeWorldReadable();
+            prefs.reload();
+            Set<String> set = prefs.getStringSet("vpn_pkgs", null);
+            return set != null && set.contains(pkg);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static final int TRANSPORT_VPN = 4;
+    private static final int NET_CAPABILITY_NOT_VPN = 15;
+
+    /**
+     * 在应用进程内，让常见的 VPN / 代理检测 API 报告「没有 VPN」：
+     *   1. NetworkCapabilities.hasTransport(TRANSPORT_VPN) -> false
+     *   2. NetworkCapabilities.hasCapability(NET_CAPABILITY_NOT_VPN) -> true
+     *   3. NetworkInterface.getNetworkInterfaces() 过滤掉 tun/ppp/tap 接口
+     * 全部容错，任何失败都不影响应用运行。网络类由 boot ClassLoader 加载，故传 null。
+     */
+    private static void hookVpnHide() {
+        try {
+            XposedHelpers.findAndHookMethod("android.net.NetworkCapabilities", null, "hasTransport",
+                    int.class, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if ((int) param.args[0] == TRANSPORT_VPN) param.setResult(false);
+                        }
+                    });
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "hasTransport hook failed: " + t);
+        }
+        try {
+            XposedHelpers.findAndHookMethod("android.net.NetworkCapabilities", null, "hasCapability",
+                    int.class, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if ((int) param.args[0] == NET_CAPABILITY_NOT_VPN) param.setResult(true);
+                        }
+                    });
+        } catch (Throwable ignored) {
+        }
+        try {
+            XposedHelpers.findAndHookMethod("java.net.NetworkInterface", null, "getNetworkInterfaces",
+                    new XC_MethodHook() {
+                        @Override
+                        @SuppressWarnings("unchecked")
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            Object res = param.getResult();
+                            if (!(res instanceof Enumeration)) return;
+                            ArrayList<Object> kept = new ArrayList<>();
+                            Enumeration<Object> en = (Enumeration<Object>) res;
+                            while (en.hasMoreElements()) {
+                                Object ni = en.nextElement();
+                                String name = "";
+                                try {
+                                    name = String.valueOf(ni.getClass().getMethod("getName").invoke(ni));
+                                } catch (Throwable ignored) {
+                                }
+                                if (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("tap")) continue;
+                                kept.add(ni);
+                            }
+                            param.setResult(Collections.enumeration(kept));
+                        }
+                    });
+        } catch (Throwable ignored) {
         }
     }
 
