@@ -533,6 +533,9 @@ public class MainActivity extends Activity implements Monitor.Listener {
             if (!e.pids.isEmpty()) p.add("自身 CPU " + Analyzer.fmt(e.cpuAvg) + "%");
             return TextUtils.join(" · ", p);
         }
+        if (e.type == Analyzer.KSU && e.measuredCpu > 0.05) {
+            p.add("注入实测 " + Analyzer.fmt(e.measuredCpu) + "%（" + measuredWhere(e, 2) + "）");
+        }
         if (e.powerMw > 0) p.add("≈" + e.powerMw + "mW");
         if (e.rssKb > 0) p.add("内存 " + e.rssKb / 1024 + "MB");
         if (e.type == Analyzer.KSU) p.add("进程 " + e.pids.size());
@@ -597,7 +600,7 @@ public class MainActivity extends Activity implements Monitor.Listener {
             if (e.raw.optBoolean("sysprop")) scripts.add("system.prop");
             if (!scripts.isEmpty()) s.add(u.text("脚本：" + TextUtils.join("、", scripts), 13, u.dim, false));
         }
-        if (e.type == Analyzer.LSP && e.measured != null) {
+        if ((e.type == Analyzer.LSP || e.type == Analyzer.KSU) && e.measured != null) {
             JSONObject procs = e.measured.optJSONObject("procs");
             if (procs != null && procs.length() > 0) {
                 s.section("实测占用分布（单核 %）");
@@ -714,7 +717,10 @@ public class MainActivity extends Activity implements Monitor.Listener {
             l.add(new Object[]{"模块应用自身", e.pids.isEmpty() ? "未运行" : Analyzer.fmt(e.cpuAvg) + "%", u.fg});
             return l;
         }
-        l.add(new Object[]{"CPU（15秒均值）", Analyzer.fmt(e.cpuAvg) + "%", lc});
+        if (e.type == Analyzer.KSU && e.measuredCpu >= 0) {
+            l.add(new Object[]{"注入代码实测", Analyzer.fmt(e.measuredCpu) + "%", lc});
+        }
+        l.add(new Object[]{e.type == Analyzer.KSU ? "模块进程 CPU" : "CPU（15秒均值）", Analyzer.fmt(e.cpuAvg) + "%", lc});
         l.add(new Object[]{"估算功耗", e.powerMw > 0 ? e.powerMw + " mW" : "--", u.fg});
         l.add(new Object[]{"内存", e.rssKb > 0 ? e.rssKb / 1024 + " MB" : "--", u.fg});
         l.add(new Object[]{"进程数", String.valueOf(e.pids.size()), u.fg});
@@ -1149,6 +1155,11 @@ public class MainActivity extends Activity implements Monitor.Listener {
                 h.value.setText(e.wlFrac >= 0 ? Math.round(e.wlFrac * 100) + "%" : "--");
                 h.caption.setText("持锁");
                 frac = Math.max(0, e.wlFrac);
+            } else if (e.type == Analyzer.KSU && e.measuredCpu > 0.05) {
+                double v = e.cpuAvg + e.measuredCpu;
+                h.value.setText(Analyzer.fmt(v) + "%");
+                h.caption.setText("CPU（含注入）");
+                frac = v / 100;
             } else if (e.type == Analyzer.LSP && e.measuredCpu >= 0) {
                 h.value.setText(Analyzer.fmt(e.measuredCpu) + "%");
                 h.caption.setText("实测 CPU");

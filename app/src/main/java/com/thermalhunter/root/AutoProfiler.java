@@ -123,15 +123,17 @@ final class AutoProfiler implements Runnable {
         return PERIOD_MS;
     }
 
-    /** system_server（有模块注入系统框架时）+ 被模块作用且在占用 CPU 的应用进程，最多 4 个。 */
+    /**
+     * system_server + 被 LSPosed 模块作用且在占用 CPU 的应用进程，最多 4 个。
+     * system_server 总是候选：Zygisk 模块（如 HMA-OSS）也会注入它，而这类注入在 LSPosed 作用域里看不到。
+     */
     private Map<Integer, String> pickTargets() {
-        boolean wantSystem = false;
+        boolean wantSystem = true;
         Set<String> scoped = new HashSet<>();
         for (LspModules.Module m : LspModules.get().modules) {
             if (!m.enabled) continue;
             for (LspModules.Scope s : m.scopes) {
-                if ("system".equals(s.pkg) || "android".equals(s.pkg)) wantSystem = true;
-                else scoped.add(s.pkg);
+                if (!"system".equals(s.pkg) && !"android".equals(s.pkg)) scoped.add(s.pkg);
             }
         }
         List<Scanner.Proc> cands = new ArrayList<>();

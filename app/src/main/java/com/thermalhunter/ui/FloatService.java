@@ -279,6 +279,7 @@ public class FloatService extends Service implements Monitor.Listener {
         List<Entity> items = new ArrayList<>();
         for (Entity e : r.heat) if (e.cpuAvg >= 0.5 || e.level != Analyzer.OK) items.add(e);
         for (Entity e : r.lsp) if (e.measuredCpu >= 0.5) items.add(e);
+        for (Entity e : r.ksu) if (e.measuredCpu >= 0.5) items.add(e);
         Collections.sort(items, (a, b) -> Double.compare(value(b), value(a)));
         int n = 0;
         for (Entity e : items) {
@@ -308,13 +309,15 @@ public class FloatService extends Service implements Monitor.Listener {
     }
 
     private static double value(Entity e) {
-        return e.type == Analyzer.LSP ? e.measuredCpu : e.cpuAvg;
+        if (e.type == Analyzer.LSP) return e.measuredCpu;
+        if (e.type == Analyzer.KSU) return e.cpuAvg + Math.max(0, e.measuredCpu);
+        return e.cpuAvg;
     }
 
     private void bindRow(View[] v, Entity e) {
         ((GradientDrawable) v[1].getBackground())
                 .setColor(e.level == Analyzer.OK ? Ui.typeColor(e) : u.levelColor(e.level));
-        ((TextView) v[2]).setText(e.type == Analyzer.LSP ? u.label(e) + "（模块）" : u.label(e));
+        ((TextView) v[2]).setText(e.type == Analyzer.LSP || e.type == Analyzer.KSU ? u.label(e) + "（模块）" : u.label(e));
         TextView val = (TextView) v[3];
         val.setText(Analyzer.fmt(value(e)) + "%");
         val.setTextColor(e.level == Analyzer.OK ? u.fg : u.levelColor(e.level));

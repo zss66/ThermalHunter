@@ -291,6 +291,12 @@ public final class Analyzer {
         r.heat.removeIf(e -> e.type == KERNEL && e.cpuAvg < 1 && e.level == OK);
         Collections.sort(r.heat, (x, y) -> Double.compare(y.heat, x.heat));
 
+        // ---------------- 自动归因（root 进程 simpleperf 采样的实测结果）
+        JSONObject prof = s.optJSONObject("prof");
+        r.prof = prof;
+        boolean profOk = prof != null && prof.optBoolean("ok");
+        JSONObject profMods = profOk ? prof.optJSONObject("modules") : null;
+
         // ---------------- KSU 模块
         double maxT = Math.max(r.maxTemp, r.skinTemp);
         JSONArray ksu = s.optJSONArray("ksu");
@@ -321,11 +327,22 @@ public final class Analyzer {
                 if (!e.enabled) e.tags.add(0, "已禁用");
                 if (m.optBoolean("remove")) e.tags.add(0, "待删除");
                 if (e.enabled && e.cpuAvg >= CPU_KSU) bad(e, "模块进程合计 CPU " + fmt(e.cpuAvg) + "%");
+                // Zygisk 等方式注入到其他进程里的 Java 代码（如 HMA-OSS），由自动归因实测
+                e.measured = profMods == null ? null : profMods.optJSONObject("ksu:" + e.ksuId);
+                if (e.measured != null) {
+                    e.measuredCpu = e.measured.optDouble("cpu", 0);
+                    String where = topProc(e.measured);
+                    if (e.enabled && e.measuredCpu >= LSP_MEASURED_BAD) {
+                        bad(e, "注入的代码实测占用 " + fmt(e.measuredCpu) + "% 单核" + where);
+                    } else if (e.enabled && e.measuredCpu >= LSP_MEASURED_WARN) {
+                        warn(e, "注入的代码实测占用 " + fmt(e.measuredCpu) + "% 单核" + where);
+                    }
+                }
                 if (e.enabled && maxT >= 45 && (e.tags.contains("替换温控配置") || e.tags.contains("脚本操作温控"))) {
                     warn(e, "当前温度 " + fmt(maxT) + "°C，且该模块修改了温控，可能是发热原因");
                 }
                 if (e.enabled && e.tags.contains("持有内核唤醒锁")) warn(e, "脚本会写 /sys/power/wake_lock，可能阻止深睡");
-                e.heat = e.cpuAvg + (e.level == BAD ? 1000 : e.level == WARN ? 100 : 0) + (e.enabled ? 1 : 0);
+                e.heat = e.cpuAvg + Math.max(0, e.measuredCpu) + (e.level == BAD ? 1000 : e.level == WARN ? 100 : 0) + (e.enabled ? 1 : 0);
                 r.ksu.add(e);
             }
             Collections.sort(r.ksu, (x, y) -> Double.compare(y.heat, x.heat));
@@ -333,10 +350,6 @@ public final class Analyzer {
 
         // ---------------- LSPosed 模块
         JSONObject lsp = s.optJSONObject("lsp");
-        JSONObject prof = s.optJSONObject("prof");
-        r.prof = prof;
-        boolean profOk = prof != null && prof.optBoolean("ok");
-        JSONObject profMods = profOk ? prof.optJSONObject("modules") : null;
         if (lsp != null) {
             JSONArray mods = lsp.optJSONArray("modules");
             if (mods != null) {
