@@ -77,7 +77,7 @@ public class HookEntry implements IXposedHookLoadPackage {
 
     /** 银行 / 金融类应用的代理检测属于风控，不对其生效。 */
     private static final Set<String> VPN_HIDE_DENY = new java.util.HashSet<>(java.util.Arrays.asList(
-            "com.citiccard.mobilebank", "com.pingan.smt"));
+            "com.citiccard.mobilebank"));
 
     /** 读取本模块的配置（LSPosed 远程偏好），判断某应用是否启用了 VPN 隐身。读不到即视为未启用。 */
     private static boolean vpnHideEnabledFor(String pkg) {
