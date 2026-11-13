@@ -1062,23 +1062,26 @@ public class MainActivity extends Activity implements Monitor.Listener {
                 snack("读取不到支持的刷新率" + (r.has("error") ? "：" + r.optString("error") : ""), false);
                 return;
             }
-            int min = rates.optInt(0), max = rates.optInt(rates.length() - 1);
+            int max = rates.optInt(rates.length() - 1);
             StringBuilder rs = new StringBuilder();
             for (int i = 0; i < rates.length(); i++) rs.append(i > 0 ? "/" : "").append(rates.optInt(i));
-            String cur = r.optString("min", "") + "–" + r.optString("peak", "");
             Sheet s = new Sheet(this, u).title("屏幕刷新率",
-                    "支持 " + rs + "Hz · 当前锁定 " + cur + "Hz");
-            s.action("性能 · 锁定 " + max + "Hz（忽略系统限频）", Sheet.PRIMARY, () -> applyRefresh(max, max));
-            if (max > min) s.action("自动 · " + min + "–" + max + "Hz（交给系统）", Sheet.NORMAL, () -> applyRefresh(min, max));
-            s.action("省电 · 锁定 60Hz", Sheet.NORMAL, () -> applyRefresh(60, 60));
+                    "支持 " + rs + "Hz · 当前 " + r.optInt("current", -1) + "Hz。锁定后忽略系统的按应用限频；熄屏后可能需重设。");
+            for (int i = rates.length() - 1; i >= 0; i--) {
+                int fps = rates.optInt(i);
+                s.action("锁定 " + fps + "Hz" + (fps == max ? "（最高）" : ""),
+                        fps == max ? Sheet.PRIMARY : Sheet.NORMAL, () -> applyRefresh(fps));
+            }
+            s.action("交还系统（自动）", Sheet.NORMAL, () -> applyRefresh(0));
             s.action("取消", Sheet.NORMAL, null);
             s.show();
         });
     }
 
-    private void applyRefresh(int min, int max) {
-        mon.call("REFRESH_SET " + min + " " + max, r ->
-                snack(r.optBoolean("ok") ? r.optString("msg") : "设置失败：" + r.optString("error"), r.optBoolean("ok")));
+    private void applyRefresh(int fps) {
+        mon.call("REFRESH_SET " + fps, r ->
+                snack(r.optBoolean("ok") ? r.optString("msg") : (r.has("error") ? r.optString("error") : "设置失败"),
+                        r.optBoolean("ok")));
     }
 
     // ------------------------------------------------------------------ VPN 隐身

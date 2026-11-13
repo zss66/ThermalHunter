@@ -119,8 +119,8 @@ public final class RootMain {
                 return act.reboot();
             case "REFRESH_INFO":
                 return Display.info();
-            case "REFRESH_SET": // REFRESH_SET <min> <peak>
-                return Display.set(Double.parseDouble(strArg(a, 1)), Double.parseDouble(strArg(a, 2)));
+            case "REFRESH_SET": // REFRESH_SET <fps>，0=交还系统
+                return Display.set(intArg(a, 1, 0));
             case "PING": {
                 JSONObject o = new JSONObject();
                 o.put("ok", true);
