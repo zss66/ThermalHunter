@@ -86,6 +86,7 @@ public final class RootMain {
         }
         switch (a[0]) {
             case "SNAPSHOT": {
+                Display.hold();
                 JSONObject snap = s.snapshot();
                 JSONObject prof = autoProfiler == null ? null : autoProfiler.poll();
                 if (prof != null) snap.put("prof", prof);

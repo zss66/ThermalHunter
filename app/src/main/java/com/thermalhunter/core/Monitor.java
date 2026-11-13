@@ -185,6 +185,9 @@ public final class Monitor {
             }
             // 新会话：同步 LSP 模块自动归因开关（Shizuku 模式下 root 端会拒绝，忽略即可）
             root.safeCall("AUTOPROF " + (autoProfEnabled() ? 1 : 0));
+            // 重新建立刷新率锁定（上一会话退出后 lockedIdx 已丢失）
+            int lockFps = prefs.getInt("lock_fps", 0);
+            if (lockFps > 0) root.safeCall("REFRESH_SET " + lockFps);
         }
         JSONObject snap = root.safeCall("SNAPSHOT");
         if (snap.optBoolean("ok")) {

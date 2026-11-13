@@ -1082,6 +1082,7 @@ public class MainActivity extends Activity implements Monitor.Listener {
     }
 
     private void applyRefresh(int fps) {
+        prefs.edit().putInt("lock_fps", fps).apply(); // 记住选择，App 运行时自动保持
         mon.call("REFRESH_SET " + fps, r ->
                 snack(r.optBoolean("ok") ? r.optString("msg") : (r.has("error") ? r.optString("error") : "设置失败"),
                         r.optBoolean("ok")));

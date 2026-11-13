@@ -20,6 +20,9 @@ import java.util.regex.Pattern;
 final class Display {
     private Display() {}
 
+    /** 当前锁定的 SurfaceFlinger 模式索引；-1 表示未锁定。由 set() 维护，hold() 周期性重应用。 */
+    private static volatile int lockedIdx = -1;
+
     // DisplayMode{id=0, width=1260, height=2800, ... peakRefreshRate=144.00002 ...}
     private static final Pattern MODE = Pattern.compile(
             "DisplayMode\\{id=(\\d+), width=(\\d+), height=(\\d+),[^}]*?peakRefreshRate=([0-9.]+)");
@@ -60,6 +63,7 @@ final class Display {
     static JSONObject set(int fps) throws Exception {
         JSONObject o = new JSONObject();
         if (fps <= 0) {
+            lockedIdx = -1;
             // 交还系统：清掉 AOSP 覆盖；SurfaceFlinger 的锁定会在下次熄/亮屏后自动释放
             Sys.exec("settings", "delete", "system", "min_refresh_rate");
             Sys.exec("settings", "delete", "system", "peak_refresh_rate");
@@ -78,12 +82,13 @@ final class Display {
         // AOSP 提示 + SurfaceFlinger 强制
         Sys.exec("settings", "put", "system", "min_refresh_rate", String.valueOf(fps));
         Sys.exec("settings", "put", "system", "peak_refresh_rate", String.valueOf(fps));
+        lockedIdx = idx;
         Object[] r = Sys.exec("service", "call", "SurfaceFlinger", "1035", "i32", String.valueOf(idx));
         try { Thread.sleep(400); } catch (InterruptedException ignored) {}
         int got = currentFps();
         boolean ok = (int) r[0] == 0 && (got == fps || got < 0);
         o.put("ok", ok);
-        if (ok) o.put("msg", "已锁定 " + fps + "Hz（对所有应用生效；熄屏后可能需重新设置）");
+        if (ok) o.put("msg", "已锁定 " + fps + "Hz（对所有应用生效；热源猎手开启时自动保持，完全退出后交还系统）");
         else o.put("error", "设置未生效（当前 " + got + "Hz）；可能需在系统设置里关闭「智能切换刷新率」");
         o.put("current", got);
         return o;
@@ -92,6 +97,16 @@ final class Display {
     private static final Pattern DM_MODE = Pattern.compile("\\{id=(\\d+), width=\\d+, height=\\d+, fps=([0-9.]+)");
 
     /** 当前锁定的面板模式刷新率（取整）。读 mActiveModeId 而非 renderFrameRate，后者随画面内容变化。 */
+    /** 重新应用已锁定的刷新率（搭 SNAPSHOT 每 3 秒一次；未锁定时为空操作，仅一次廉价的 binder 调用）。 */
+    static void hold() {
+        int idx = lockedIdx;
+        if (idx < 0) return;
+        try {
+            Sys.exec("service", "call", "SurfaceFlinger", "1035", "i32", String.valueOf(idx));
+        } catch (Throwable ignored) {
+        }
+    }
+
     private static int currentFps() {
         String dump = String.valueOf(Sys.execMax(1 << 20, "dumpsys", "display")[1]);
         Matcher a = Pattern.compile("mActiveModeId=(\\d+)").matcher(dump);
