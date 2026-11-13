@@ -26,7 +26,7 @@ import java.util.Set;
  */
 final class AutoProfiler implements Runnable {
 
-    private static final int PERIOD_MS = 30_000, WINDOW_SEC = 15, FREQ = 40;
+    private static final int PERIOD_MS = 30_000, IDLE_RECHECK_MS = 10_000, WINDOW_SEC = 15, FREQ = 40;
     private static final double MIN_HOST_CPU = 2.0;   // 宿主进程（单核%）低于此值不采样
     private static final double EMA = 0.6;             // 新窗口的权重
     private static final long DEMAND_TIMEOUT_MS = 20_000;
@@ -67,37 +67,37 @@ final class AutoProfiler implements Runnable {
         }
         while (true) {
             long start = SystemClock.elapsedRealtime();
-            boolean worked;
+            int next;
             try {
-                worked = cycle();
+                next = cycle();
             } catch (Throwable e) {
                 latest = error("自动归因出错：" + e);
-                worked = true;
+                next = PERIOD_MS;
             }
             long spent = SystemClock.elapsedRealtime() - start;
-            // 没在工作（无人取数据 / 已关闭）时每 2 秒检查一次，以便界面打开后尽快开始
-            sleep(worked ? Math.max(2000, PERIOD_MS - spent) : 2000);
+            sleep(Math.max(2000, next - spent));
         }
     }
 
-    /** @return 本周期是否做了实际工作 */
-    private boolean cycle() throws Exception {
-        if (!enabled || broken || SystemClock.elapsedRealtime() - lastDemand > DEMAND_TIMEOUT_MS) return false;
-        // 等扫描器先有一轮 CPU 数据再挑选目标
-        synchronized (scanner.lastProcs) {
-            if (scanner.lastProcs.isEmpty()) return false;
-        }
+    /**
+     * @return 距下一周期的间隔（毫秒）：采样后按完整周期；宿主空闲时较快复查；
+     * 未在工作（无人取数据 / 已关闭 / 扫描数据未就绪）时 2 秒后再看，以便尽快开始。
+     */
+    private int cycle() throws Exception {
+        if (!enabled || broken || SystemClock.elapsedRealtime() - lastDemand > DEMAND_TIMEOUT_MS) return 2000;
+        // 至少两轮扫描后进程 CPU 才有意义（第一轮没有差值，全为 0）
+        if (scanner.scans < 2) return 2000;
         if (!Profiler.available()) {
             broken = true;
             latest = error("系统没有自带 simpleperf，无法自动归因模块占用");
-            return true;
+            return PERIOD_MS;
         }
         Map<Integer, String> targets = pickTargets();
         if (targets.isEmpty()) {
             // 宿主都很空闲：模块占用视为 0，并逐步衰减旧数据
             decayAll();
             latest = result(null, Collections.emptyList(), "注入模块的进程都很空闲");
-            return true;
+            return IDLE_RECHECK_MS;
         }
         Profiler.Window w;
         try {
@@ -106,7 +106,7 @@ final class AutoProfiler implements Runnable {
             String msg = String.valueOf(e.getMessage());
             if (msg.contains("没有自带")) broken = true;
             latest = error(msg);
-            return true;
+            return PERIOD_MS;
         }
         double wallNs = Math.max(1, w.wallNs);
         Set<String> seen = new HashSet<>();
@@ -120,7 +120,7 @@ final class AutoProfiler implements Runnable {
             if (!seen.contains(e.getKey())) e.setValue(e.getValue() * (1 - EMA));
         }
         latest = result(w, new ArrayList<>(targets.values()), null);
-        return true;
+        return PERIOD_MS;
     }
 
     /** system_server（有模块注入系统框架时）+ 被模块作用且在占用 CPU 的应用进程，最多 4 个。 */

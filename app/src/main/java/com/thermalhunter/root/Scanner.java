@@ -52,6 +52,8 @@ final class Scanner {
     private long pkgListTime;
 
     final List<Proc> lastProcs = new ArrayList<>();
+    /** 已完成的扫描轮数；第一轮没有上一轮的 tick，CPU 全为 0。 */
+    volatile int scans;
     private JSONObject device;
 
     Scanner() {
@@ -154,6 +156,7 @@ final class Scanner {
             lastProcs.clear();
             lastProcs.addAll(procs);
         }
+        scans++;
         return out;
     }
 
