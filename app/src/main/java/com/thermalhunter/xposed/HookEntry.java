@@ -63,6 +63,10 @@ public class HookEntry implements IXposedHookLoadPackage {
             hookConnectivityVpn(lpparam.classLoader);
             return;
         }
+        // system_server 里还托管着 providers.settings / telecom / location.fused 等包，LSPosed 会用它们的包名
+        // 再回调一次。绝不能在系统 uid 进程里装应用级隐身 hook：那会让 ConnectivityService 把 VPN 网络当成
+        // 普通网络，5 秒后当作「无人需要」拆掉，所有 VPN/代理软件都会失效。
+        if (android.os.Process.myUid() % 100000 < 10000) return;
         // 普通应用：若用户为它开启了「VPN 隐身」，则对其隐藏 VPN 相关信号
         if (vpnHideEnabledFor(lpparam.packageName)) {
             hookVpnHide();
@@ -71,15 +75,18 @@ public class HookEntry implements IXposedHookLoadPackage {
 
     // ---------------------------------------------------------------- VPN 隐身
 
-    /** 读取本模块世界可读的配置，判断某应用是否启用了 VPN 隐身。失败即视为未启用。 */
+    /** 银行 / 金融类应用的代理检测属于风控，不对其生效。 */
+    private static final Set<String> VPN_HIDE_DENY = new java.util.HashSet<>(java.util.Arrays.asList(
+            "com.citiccard.mobilebank", "com.pingan.smt"));
+
+    /** 读取本模块的配置（LSPosed 远程偏好），判断某应用是否启用了 VPN 隐身。读不到即视为未启用。 */
     private static boolean vpnHideEnabledFor(String pkg) {
+        if (VPN_HIDE_DENY.contains(pkg)) return false;
         try {
             XSharedPreferences prefs = new XSharedPreferences("com.thermalhunter", "hide");
-            prefs.makeWorldReadable();
             prefs.reload();
             Set<String> set = prefs.getStringSet("vpn_pkgs", null);
-            // 读不到配置（SELinux 跨进程）时兜底生效：模块只会被挂进用户在作用域里选的应用
-            return set == null || set.contains(pkg);
+            return set != null && set.contains(pkg);
         } catch (Throwable t) {
             return false;
         }
@@ -159,7 +166,7 @@ public class HookEntry implements IXposedHookLoadPackage {
                         int sp = line.indexOf(' ');
                         if (sp <= 0) continue;
                         String pkg = line.substring(0, sp);
-                        if (!pkgs.contains(pkg)) continue;
+                        if (!pkgs.contains(pkg) || VPN_HIDE_DENY.contains(pkg)) continue;
                         int sp2 = line.indexOf(' ', sp + 1);
                         if (sp2 <= sp) continue;
                         try {

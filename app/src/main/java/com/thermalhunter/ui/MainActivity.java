@@ -1090,8 +1090,25 @@ public class MainActivity extends Activity implements Monitor.Listener {
 
     // ------------------------------------------------------------------ VPN 隐身
 
+    /**
+     * 模块激活时用 MODE_WORLD_READABLE：LSPosed（xposedsharedprefs）会把它重定向到 hook 进程可读的远程偏好，
+     * XSharedPreferences 才读得到。未激活时会抛 SecurityException，退回私有文件。
+     */
+    @SuppressWarnings("deprecation")
     private SharedPreferences hidePrefs() {
-        return getSharedPreferences("hide", MODE_PRIVATE);
+        SharedPreferences local = getSharedPreferences("hide", MODE_PRIVATE);
+        try {
+            SharedPreferences remote = getSharedPreferences("hide", MODE_WORLD_READABLE);
+            if (remote != local && !remote.contains("vpn_pkgs") && local.contains("vpn_pkgs")) {
+                // 迁移旧版本写在私有文件里的名单
+                remote.edit().putStringSet("vpn_pkgs",
+                        new java.util.HashSet<>(local.getStringSet("vpn_pkgs", java.util.Collections.emptySet())))
+                        .apply();
+            }
+            return remote;
+        } catch (SecurityException e) {
+            return local;
+        }
     }
 
     private java.util.Set<String> vpnHidePkgs() {
