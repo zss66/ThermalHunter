@@ -978,6 +978,12 @@ public class MainActivity extends Activity implements Monitor.Listener {
                         + "会额外占用少量 CPU，只在界面或悬浮窗开启时运行",
                 mon.autoProfEnabled(), on -> mon.setAutoProf(on)));
 
+        s.section("屏幕刷新率");
+        s.add(navRow("调整全局刷新率", "锁定高刷后对所有应用统一生效，不再被系统按应用限频", () -> {
+            s.dismiss();
+            openRefreshSheet();
+        }));
+
         s.section("VPN 隐身（对所选应用隐藏 VPN 状态）");
         s.add(navRow("选择要隐身的应用…", vpnHideSummary(), () -> {
             s.dismiss();
@@ -1042,6 +1048,37 @@ public class MainActivity extends Activity implements Monitor.Listener {
         r.addView(sw, Ui.lp(-2, -2, u.dp(8), 0, 0, 0));
         r.setOnClickListener(v -> sw.toggle());
         return r;
+    }
+
+    // ------------------------------------------------------------------ 刷新率
+
+    private void openRefreshSheet() {
+        snack("正在读取刷新率…", true);
+        mon.call("REFRESH_INFO", r -> {
+            ui.removeCallbacks(hideSnack);
+            snack.setVisibility(View.GONE);
+            JSONArray rates = r.optJSONArray("rates");
+            if (!r.optBoolean("ok") || rates == null || rates.length() == 0) {
+                snack("读取不到支持的刷新率" + (r.has("error") ? "：" + r.optString("error") : ""), false);
+                return;
+            }
+            int min = rates.optInt(0), max = rates.optInt(rates.length() - 1);
+            StringBuilder rs = new StringBuilder();
+            for (int i = 0; i < rates.length(); i++) rs.append(i > 0 ? "/" : "").append(rates.optInt(i));
+            String cur = r.optString("min", "") + "–" + r.optString("peak", "");
+            Sheet s = new Sheet(this, u).title("屏幕刷新率",
+                    "支持 " + rs + "Hz · 当前锁定 " + cur + "Hz");
+            s.action("性能 · 锁定 " + max + "Hz（忽略系统限频）", Sheet.PRIMARY, () -> applyRefresh(max, max));
+            if (max > min) s.action("自动 · " + min + "–" + max + "Hz（交给系统）", Sheet.NORMAL, () -> applyRefresh(min, max));
+            s.action("省电 · 锁定 60Hz", Sheet.NORMAL, () -> applyRefresh(60, 60));
+            s.action("取消", Sheet.NORMAL, null);
+            s.show();
+        });
+    }
+
+    private void applyRefresh(int min, int max) {
+        mon.call("REFRESH_SET " + min + " " + max, r ->
+                snack(r.optBoolean("ok") ? r.optString("msg") : "设置失败：" + r.optString("error"), r.optBoolean("ok")));
     }
 
     // ------------------------------------------------------------------ VPN 隐身
