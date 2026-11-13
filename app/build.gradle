@@ -8,8 +8,8 @@ android {
         applicationId 'com.thermalhunter'
         minSdk 29
         targetSdk 35
-        versionCode 6
-        versionName '1.2.2'
+        versionCode 7
+        versionName '1.2.3'
     }
 
     // 固定签名：从环境变量或 keystore.properties 读取；都没有时回退到 debug 签名
