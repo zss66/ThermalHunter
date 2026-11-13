@@ -6,7 +6,9 @@ import android.os.SystemClock;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.BufferedReader;
 import java.io.FileOutputStream;
+import java.io.FileReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -58,6 +60,7 @@ public class HookEntry implements IXposedHookLoadPackage {
             Stats.start();
             hookWakeLocks(lpparam.classLoader);
             hookAlarms(lpparam.classLoader);
+            hookConnectivityVpn(lpparam.classLoader);
             return;
         }
         // 普通应用：若用户为它开启了「VPN 隐身」，则对其隐藏 VPN 相关信号
@@ -84,6 +87,93 @@ public class HookEntry implements IXposedHookLoadPackage {
 
     private static final int TRANSPORT_VPN = 4;
     private static final int NET_CAPABILITY_NOT_VPN = 15;
+
+    // ---------------------------------------------------------------- system_server 级 VPN 隐身
+
+    /** 目标应用的 appId 集合（名单里包名解析出的 uid），周期性刷新。 */
+    private static volatile java.util.Set<Integer> sVpnHideAppIds = java.util.Collections.emptySet();
+    private static volatile long sVpnHideAt;
+
+    /**
+     * 在 system_server 里 hook 「按调用方脱敏 NetworkCapabilities」的总闸：
+     * 对隐身名单里的应用，把交给它的 NetworkCapabilities 克隆一份、抹掉 VPN 标志。
+     * 拉取和回调两条路都经过此方法，native 调用方拿到的也是改过的 parcel。
+     * 任何异常都吞掉，绝不能让 system_server 崩。
+     */
+    private static void hookConnectivityVpn(ClassLoader cl) {
+        Class<?> cs = XposedHelpers.findClassIfExists(
+                "android.net.connectivity.com.android.server.ConnectivityService", cl);
+        if (cs == null) cs = XposedHelpers.findClassIfExists("com.android.server.ConnectivityService", cl);
+        if (cs == null) {
+            XposedBridge.log(TAG + "ConnectivityService class not found; VPN source-hide disabled");
+            return;
+        }
+        try {
+            XposedBridge.hookAllMethods(cs, "createWithLocationInfoSanitizedIfNecessaryWhenParceled",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                Object nc = param.getResult();
+                                if (nc == null || param.args.length < 4) return;
+                                Object uidArg = param.args[3];
+                                if (!(uidArg instanceof Integer)) return;
+                                int appId = ((Integer) uidArg) % 100000; // UserHandle.getAppId
+                                if (!vpnHideAppIds().contains(appId)) return;
+                                if (!Boolean.TRUE.equals(XposedHelpers.callMethod(nc, "hasTransport", TRANSPORT_VPN))) {
+                                    return;
+                                }
+                                // 克隆后改造，绝不动原对象
+                                Object copy = nc.getClass().getConstructor(nc.getClass()).newInstance(nc);
+                                XposedHelpers.callMethod(copy, "removeTransportType", TRANSPORT_VPN);
+                                try {
+                                    XposedHelpers.callMethod(copy, "addCapability", NET_CAPABILITY_NOT_VPN);
+                                } catch (Throwable ignored) {
+                                }
+                                param.setResult(copy);
+                            } catch (Throwable t) {
+                                // 吞掉：绝不影响 system_server
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + "ConnectivityService VPN source-hide installed");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "CS hook failed: " + t);
+        }
+    }
+
+    /** 名单包名 → appId 集合；每 30 秒刷新一次。读本模块配置 + /data/system/packages.list。 */
+    private static java.util.Set<Integer> vpnHideAppIds() {
+        long now = SystemClock.elapsedRealtime();
+        if (now - sVpnHideAt < 30_000) return sVpnHideAppIds;
+        sVpnHideAt = now;
+        java.util.Set<Integer> ids = new java.util.HashSet<>();
+        try {
+            XSharedPreferences prefs = new XSharedPreferences("com.thermalhunter", "hide");
+            prefs.reload();
+            Set<String> pkgs = prefs.getStringSet("vpn_pkgs", null);
+            if (pkgs != null && !pkgs.isEmpty()) {
+                try (BufferedReader br = new BufferedReader(new FileReader("/data/system/packages.list"))) {
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        int sp = line.indexOf(' ');
+                        if (sp <= 0) continue;
+                        String pkg = line.substring(0, sp);
+                        if (!pkgs.contains(pkg)) continue;
+                        int sp2 = line.indexOf(' ', sp + 1);
+                        if (sp2 <= sp) continue;
+                        try {
+                            ids.add(Integer.parseInt(line.substring(sp + 1, sp2)) % 100000);
+                        } catch (NumberFormatException ignored) {
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        sVpnHideAppIds = ids;
+        return ids;
+    }
 
     /**
      * 在应用进程内，让常见的 VPN / 代理检测 API 报告「没有 VPN」：
