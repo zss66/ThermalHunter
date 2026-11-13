@@ -1,10 +1,5 @@
 package com.thermalhunter.root;
 
-import android.os.SystemClock;
-
-import org.json.JSONArray;
-import org.json.JSONObject;
-
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -25,18 +20,19 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
- * 深度分析：用系统自带的 simpleperf 对目标进程按 CPU 时间采样，再按调用栈把 CPU 分到具体的 LSPosed 模块。
+ * 用系统自带的 simpleperf 对目标进程按 CPU 时间（cpu-clock）采样，再按调用栈把 CPU 分到具体的 LSPosed 模块。
  *
  * 归属规则：从正在执行的方法往外逐层查看调用栈，第一个属于某模块（按模块 APK 内 dex 的类名判断）的方法
  * 就是该样本的归属；若该类被多个模块共有（如都打包了 kotlin 标准库），继续向外取交集直到能区分。
  * 系统分区里的代码（/system、/apex 等）一律不算模块，避免同名类误判。
+ * 每个样本的 event_count 就是它代表的 CPU 纳秒数，因此结果直接是各模块消耗的 CPU 时间。
  *
  * 局限：hook 导致的间接开销（如被 hook 的方法不能再被内联）无法统计，结果会略微低估模块的影响。
  */
 final class Profiler {
     private Profiler() {}
 
-    private static final String SIMPLEPERF = "/system/bin/simpleperf";
+    static final String SIMPLEPERF = "/system/bin/simpleperf";
     private static final String DATA = "/data/local/tmp/thermalhunter_perf.data";
     private static final String TEXT = "/data/local/tmp/thermalhunter_perf.txt";
     private static final String[] SYSTEM_PREFIXES = {"/system/", "/apex/", "/vendor/", "/product/", "/system_ext/", "/odm/"};
@@ -46,185 +42,157 @@ final class Profiler {
     /** apk 路径 + 修改时间 → 类名集合，避免每次都重新解析。 */
     private static final Map<String, Set<String>> DEX_CACHE = new HashMap<>();
 
-    static JSONObject run(String target, int seconds) throws Exception {
-        JSONObject o = new JSONObject();
-        if (!new File(SIMPLEPERF).exists()) return fail("系统没有自带 simpleperf（" + SIMPLEPERF + "），无法进行深度分析");
-        int pid = resolvePid(target);
-        if (pid <= 0) return fail("找不到进程: " + target);
-        String procName = procName(pid);
-        seconds = Math.max(5, Math.min(30, seconds));
+    /** 一个采样窗口的结果。所有数值都是 CPU 纳秒。 */
+    static final class Window {
+        long wallNs, samples, javaSamples, totalNs, bridgeNs, ambiguousNs;
+        final Map<String, Long> moduleNs = new HashMap<>();
+        final Map<String, Map<String, Long>> moduleProcNs = new HashMap<>();   // 模块 → 进程名 → ns
+        final Map<String, Map<String, Long>> moduleMethodNs = new HashMap<>(); // 模块 → 方法 → ns
+    }
 
-        // 1. 按 CPU 时间采样（cpu-clock 为软件事件，不依赖硬件计数器）
+    static boolean available() {
+        return new File(SIMPLEPERF).exists();
+    }
+
+    /**
+     * 采样一个窗口。
+     * @param targets pid → 进程名
+     */
+    static Window sample(Map<Integer, String> targets, int seconds, int freq) throws Exception {
+        if (!available()) throw new Exception("系统没有自带 simpleperf（" + SIMPLEPERF + "）");
+        StringBuilder pids = new StringBuilder();
+        for (int pid : targets.keySet()) pids.append(pids.length() > 0 ? "," : "").append(pid);
         new File(DATA).delete();
         new File(TEXT).delete();
-        long t0 = procTicks(pid), w0 = SystemClock.elapsedRealtime();
-        Object[] r = Sys.exec(SIMPLEPERF, "record", "-p", String.valueOf(pid), "-e", "cpu-clock", "-f", "200",
-                "--call-graph", "dwarf,32768", "--duration", String.valueOf(seconds), "-o", DATA);
+        long w0 = System.nanoTime();
+        Object[] r = Sys.exec(SIMPLEPERF, "record", "-p", pids.toString(), "-e", "cpu-clock",
+                "-f", String.valueOf(freq), "--call-graph", "dwarf,16384",
+                "--duration", String.valueOf(seconds), "-o", DATA);
         if ((int) r[0] != 0 || !new File(DATA).exists()) {
             // 旧版本可能不支持自定义栈大小，退回默认 DWARF 调用栈
-            r = Sys.exec(SIMPLEPERF, "record", "-p", String.valueOf(pid), "-e", "cpu-clock", "-f", "200",
-                    "-g", "--duration", String.valueOf(seconds), "-o", DATA);
+            r = Sys.exec(SIMPLEPERF, "record", "-p", pids.toString(), "-e", "cpu-clock",
+                    "-f", String.valueOf(freq), "-g", "--duration", String.valueOf(seconds), "-o", DATA);
         }
-        long t1 = procTicks(pid), w1 = SystemClock.elapsedRealtime();
+        long w1 = System.nanoTime();
         if ((int) r[0] != 0 || !new File(DATA).exists()) {
-            return fail("simpleperf 采样失败：" + tail(String.valueOf(r[1])));
+            throw new Exception("simpleperf 采样失败：" + tail(String.valueOf(r[1])));
         }
-
-        // 2. 输出每个样本的调用栈
-        Object[] rep = Sys.execToFile(new File(TEXT), SIMPLEPERF, "report-sample", "-i", DATA, "--show-callchain");
-        if ((int) rep[0] != 0 || !new File(TEXT).exists()) {
-            return fail("simpleperf 解析失败：" + tail(String.valueOf(rep[1])));
+        // 线程 → 所属进程（report-sample 只给线程号）
+        Map<Integer, String> tidToProc = new HashMap<>();
+        for (Map.Entry<Integer, String> t : targets.entrySet()) {
+            for (String tid : Sys.list("/proc/" + t.getKey() + "/task")) {
+                try {
+                    tidToProc.put(Integer.parseInt(tid), t.getValue());
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            tidToProc.put(t.getKey(), t.getValue());
         }
+        try {
+            Object[] rep = Sys.execToFile(new File(TEXT), SIMPLEPERF, "report-sample", "-i", DATA, "--show-callchain");
+            if ((int) rep[0] != 0 || !new File(TEXT).exists()) {
+                throw new Exception("simpleperf 解析失败：" + tail(String.valueOf(rep[1])));
+            }
+            Map<String, Set<String>> classToModules = classMap();
+            Window w = new Window();
+            w.wallNs = w1 - w0;
+            parse(new File(TEXT), w, classToModules, tidToProc);
+            return w;
+        } finally {
+            new File(DATA).delete();
+            new File(TEXT).delete();
+        }
+    }
 
-        // 3. 模块类名表
-        Map<String, Set<String>> classToModules = new HashMap<>();
-        Map<String, String> moduleNames = new HashMap<>();
+    /** 所有 LSPosed 模块的「类名 → 模块包名」表。 */
+    private static Map<String, Set<String>> classMap() {
+        Map<String, Set<String>> map = new HashMap<>();
         for (LspModules.Module m : LspModules.get().modules) {
-            moduleNames.put(m.pkg, m.pkg);
             for (String cls : moduleClasses(m.apkPath)) {
-                Set<String> s = classToModules.get(cls);
-                if (s == null) classToModules.put(cls, s = new HashSet<>(2));
+                Set<String> s = map.get(cls);
+                if (s == null) map.put(cls, s = new HashSet<>(2));
                 s.add(m.pkg);
             }
         }
+        return map;
+    }
 
-        // 4. 逐个样本归属
-        Agg agg = new Agg();
-        try (BufferedReader br = new BufferedReader(new FileReader(TEXT), 1 << 16)) {
+    private static void parse(File text, Window w, Map<String, Set<String>> classToModules,
+                              Map<Integer, String> tidToProc) throws Exception {
+        try (BufferedReader br = new BufferedReader(new FileReader(text), 1 << 16)) {
             List<String> syms = new ArrayList<>(), files = new ArrayList<>();
-            String thread = null;
-            long count = 1;
+            int tid = -1;
+            long count = 0;
             boolean in = false;
             String line;
             while ((line = br.readLine()) != null) {
                 String t = line.trim();
                 if (t.equals("sample:")) {
-                    if (in) agg.add(syms, files, thread, count, classToModules);
+                    if (in) add(w, syms, files, tidToProc.get(tid), count, classToModules);
                     syms.clear();
                     files.clear();
-                    thread = null;
-                    count = 1;
+                    tid = -1;
+                    count = 0;
                     in = true;
                 } else if (t.startsWith("event_count:")) {
-                    try {
-                        count = Long.parseLong(t.substring(12).trim());
-                    } catch (NumberFormatException ignored) {
-                    }
-                } else if (t.startsWith("thread_name:")) {
-                    thread = t.substring(12).trim();
+                    count = parseLong(t.substring(12));
+                } else if (t.startsWith("thread_id:")) {
+                    tid = (int) parseLong(t.substring(10));
                 } else if (t.startsWith("file:")) {
                     files.add(t.substring(5).trim());
                 } else if (t.startsWith("symbol:")) {
                     syms.add(t.substring(7).trim());
                 }
             }
-            if (in) agg.add(syms, files, thread, count, classToModules);
-        } finally {
-            new File(DATA).delete();
-            new File(TEXT).delete();
+            if (in) add(w, syms, files, tidToProc.get(tid), count, classToModules);
         }
-        if (agg.samples == 0) return fail("采样期间目标进程几乎没有占用 CPU，没有可分析的数据");
-
-        double wallSec = Math.max(1, w1 - w0) / 1000.0;
-        double procCpu = t1 >= t0 && t0 >= 0 ? (t1 - t0) * 10.0 / 1000.0 / wallSec * 100 : -1; // CLK_TCK=100
-
-        o.put("ok", true);
-        o.put("pid", pid);
-        o.put("process", procName);
-        o.put("seconds", seconds);
-        o.put("samples", agg.samples);
-        o.put("procCpu", Math.round(procCpu * 10) / 10.0);
-        o.put("javaFrames", agg.javaSamples * 100.0 / agg.samples);
-
-        JSONArray mods = new JSONArray();
-        List<Map.Entry<String, Long>> ml = sorted(agg.module);
-        for (Map.Entry<String, Long> e : ml) {
-            JSONObject mo = new JSONObject();
-            mo.put("pkg", e.getKey());
-            mo.put("pct", pct(e.getValue(), agg.total));
-            JSONArray top = new JSONArray();
-            Map<String, Long> methods = agg.moduleMethods.get(e.getKey());
-            if (methods != null) for (Map.Entry<String, Long> me : head(sorted(methods), 5)) {
-                top.put(new JSONObject().put("name", me.getKey()).put("pct", pct(me.getValue(), agg.total)));
-            }
-            mo.put("methods", top);
-            mods.put(mo);
-        }
-        o.put("modules", mods);
-        o.put("bridge", pct(agg.bridge, agg.total));
-        o.put("ambiguous", pct(agg.ambiguous, agg.total));
-        JSONArray amb = new JSONArray();
-        for (Map.Entry<String, Long> e : head(sorted(agg.ambiguousSets), 3)) {
-            amb.put(new JSONObject().put("modules", e.getKey()).put("pct", pct(e.getValue(), agg.total)));
-        }
-        o.put("ambiguousDetail", amb);
-        o.put("system", pct(agg.system, agg.total));
-        JSONArray sys = new JSONArray();
-        for (Map.Entry<String, Long> e : head(sorted(agg.systemMethods), 8)) {
-            sys.put(new JSONObject().put("name", e.getKey()).put("pct", pct(e.getValue(), agg.total)));
-        }
-        o.put("systemMethods", sys);
-        JSONArray th = new JSONArray();
-        for (Map.Entry<String, Long> e : head(sorted(agg.threads), 6)) {
-            th.put(new JSONObject().put("name", e.getKey()).put("pct", pct(e.getValue(), agg.total)));
-        }
-        o.put("threads", th);
-        return o;
     }
 
-    /** 样本汇总。所有计数按 cpu-clock 事件量（纳秒）加权。 */
-    private static final class Agg {
-        long samples, javaSamples, total, bridge, ambiguous, system;
-        final Map<String, Long> module = new HashMap<>(), threads = new HashMap<>(),
-                systemMethods = new HashMap<>(), ambiguousSets = new HashMap<>();
-        final Map<String, Map<String, Long>> moduleMethods = new HashMap<>();
-
-        void add(List<String> syms, List<String> files, String thread, long count,
-                 Map<String, Set<String>> classToModules) {
-            samples++;
-            total += count;
-            if (thread != null) inc(threads, thread, count);
-            Set<String> cand = null;
-            String hit = null, firstJava = null;
-            boolean bridgeNearLeaf = false;
-            for (int i = 0; i < syms.size(); i++) {
-                String sym = syms.get(i);
-                String file = i < files.size() ? files.get(i) : "";
-                String cls = classOf(sym);
-                if (cls != null && firstJava == null) firstJava = methodOf(sym);
-                if (cand == null && i < 3 && isBridge(sym)) bridgeNearLeaf = true;
-                if (cls == null || isSystemFile(file)) continue;
-                Set<String> mods = classToModules.get(cls);
-                if (mods == null) continue;
-                if (cand == null) {
-                    cand = new HashSet<>(mods);
-                    hit = methodOf(sym);
-                } else {
-                    Set<String> inter = new HashSet<>(cand);
-                    inter.retainAll(mods);
-                    if (!inter.isEmpty()) cand = inter;
-                }
-                if (cand.size() == 1) break;
-            }
-            if (firstJava != null) javaSamples++;
-            if (cand != null && cand.size() == 1) {
-                String m = cand.iterator().next();
-                inc(module, m, count);
-                Map<String, Long> mm = moduleMethods.get(m);
-                if (mm == null) moduleMethods.put(m, mm = new HashMap<>());
-                inc(mm, hit, count);
-            } else if (cand != null) {
-                ambiguous += count;
-                List<String> l = new ArrayList<>(cand);
-                Collections.sort(l);
-                inc(ambiguousSets, String.join(" / ", l), count);
-            } else if (bridgeNearLeaf) {
-                bridge += count;
+    private static void add(Window w, List<String> syms, List<String> files, String proc, long ns,
+                            Map<String, Set<String>> classToModules) {
+        if (ns <= 0) ns = 1;
+        if (proc == null) proc = "?";
+        w.samples++;
+        w.totalNs += ns;
+        Set<String> cand = null;
+        String hit = null;
+        boolean java = false, bridgeNearLeaf = false;
+        for (int i = 0; i < syms.size(); i++) {
+            String sym = syms.get(i);
+            String file = i < files.size() ? files.get(i) : "";
+            String cls = classOf(sym);
+            if (cls != null) java = true;
+            if (cand == null && i < 3 && isBridge(sym)) bridgeNearLeaf = true;
+            if (cls == null || isSystemFile(file)) continue;
+            Set<String> mods = classToModules.get(cls);
+            if (mods == null) continue;
+            if (cand == null) {
+                cand = new HashSet<>(mods);
+                hit = methodOf(sym);
             } else {
-                system += count;
-                inc(systemMethods, firstJava != null ? firstJava : (syms.isEmpty() ? "unknown" : syms.get(0)), count);
+                Set<String> inter = new HashSet<>(cand);
+                inter.retainAll(mods);
+                if (!inter.isEmpty()) cand = inter;
             }
+            if (cand.size() == 1) break;
         }
+        if (java) w.javaSamples++;
+        if (cand != null && cand.size() == 1) {
+            String m = cand.iterator().next();
+            inc(w.moduleNs, m, ns);
+            inc(sub(w.moduleProcNs, m), proc, ns);
+            inc(sub(w.moduleMethodNs, m), hit, ns);
+        } else if (cand != null) {
+            w.ambiguousNs += ns;
+        } else if (bridgeNearLeaf) {
+            w.bridgeNs += ns;
+        }
+    }
+
+    private static Map<String, Long> sub(Map<String, Map<String, Long>> m, String k) {
+        Map<String, Long> s = m.get(k);
+        if (s == null) m.put(k, s = new HashMap<>());
+        return s;
     }
 
     private static boolean isBridge(String sym) {
@@ -239,7 +207,7 @@ final class Profiler {
     }
 
     /** "void com.foo.Bar.baz(int)" / "com.foo.Bar.baz" → "com.foo.Bar.baz"；不像 Java 方法时返回 null。 */
-    private static String methodOf(String sym) {
+    static String methodOf(String sym) {
         int p = sym.indexOf('(');
         String s = p >= 0 ? sym.substring(0, p) : sym;
         int sp = s.lastIndexOf(' ');
@@ -247,7 +215,7 @@ final class Profiler {
         return s.indexOf('.') > 0 ? s : null;
     }
 
-    private static String classOf(String sym) {
+    static String classOf(String sym) {
         String m = methodOf(sym);
         if (m == null) return null;
         int dot = m.lastIndexOf('.');
@@ -257,7 +225,7 @@ final class Profiler {
     // ------------------------------------------------------------------ dex 类名
 
     /** 读取 APK 内所有 classesN.dex 的类名（Java 形式，如 com.foo.Bar$1）。 */
-    private static Set<String> moduleClasses(String apk) {
+    static Set<String> moduleClasses(String apk) {
         if (apk == null || apk.isEmpty()) return Collections.emptySet();
         File f = new File(apk);
         String key = apk + "@" + f.lastModified();
@@ -270,8 +238,7 @@ final class Profiler {
             Enumeration<? extends ZipEntry> en = z.entries();
             while (en.hasMoreElements()) {
                 ZipEntry e = en.nextElement();
-                String n = e.getName();
-                if (!n.matches("classes\\d*\\.dex")) continue;
+                if (!e.getName().matches("classes\\d*\\.dex")) continue;
                 try (InputStream in = z.getInputStream(e)) {
                     parseDex(readAll(in), out);
                 }
@@ -319,35 +286,11 @@ final class Profiler {
 
     // ------------------------------------------------------------------ 工具
 
-    private static int resolvePid(String target) {
+    private static long parseLong(String s) {
         try {
-            int pid = Integer.parseInt(target);
-            return new File("/proc/" + pid).exists() ? pid : -1;
-        } catch (NumberFormatException ignored) {
-        }
-        for (String n : Sys.list("/proc")) {
-            if (n.isEmpty() || n.charAt(0) < '0' || n.charAt(0) > '9') continue;
-            String cl = Sys.read("/proc/" + n + "/cmdline");
-            if (cl == null) continue;
-            String first = cl.split("\0")[0];
-            if (first.equals(target)) return Integer.parseInt(n);
-        }
-        return -1;
-    }
-
-    private static String procName(int pid) {
-        String cl = Sys.read("/proc/" + pid + "/cmdline");
-        return cl == null || cl.isEmpty() ? String.valueOf(pid) : cl.split("\0")[0];
-    }
-
-    private static long procTicks(int pid) {
-        String s = Sys.read("/proc/" + pid + "/stat");
-        if (s == null) return -1;
-        try {
-            String[] f = s.substring(s.lastIndexOf(')') + 2).split(" ");
-            return Long.parseLong(f[11]) + Long.parseLong(f[12]);
-        } catch (Throwable e) {
-            return -1;
+            return Long.parseLong(s.trim());
+        } catch (NumberFormatException e) {
+            return 0;
         }
     }
 
@@ -356,29 +299,8 @@ final class Profiler {
         m.put(k, old == null ? v : old + v);
     }
 
-    private static List<Map.Entry<String, Long>> sorted(Map<String, Long> m) {
-        List<Map.Entry<String, Long>> l = new ArrayList<>(m.entrySet());
-        Collections.sort(l, (a, b) -> Long.compare(b.getValue(), a.getValue()));
-        return l;
-    }
-
-    private static <T> List<T> head(List<T> l, int n) {
-        return l.subList(0, Math.min(n, l.size()));
-    }
-
-    private static double pct(long v, long total) {
-        return total <= 0 ? 0 : Math.round(v * 1000.0 / total) / 10.0;
-    }
-
-    private static String tail(String s) {
+    static String tail(String s) {
         s = s.trim();
         return s.length() > 400 ? "…" + s.substring(s.length() - 400) : s;
-    }
-
-    private static JSONObject fail(String msg) throws Exception {
-        JSONObject o = new JSONObject();
-        o.put("ok", false);
-        o.put("error", msg);
-        return o;
     }
 }

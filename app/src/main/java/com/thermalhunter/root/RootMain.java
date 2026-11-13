@@ -28,6 +28,9 @@ public final class RootMain {
         }));
         Scanner scanner = new Scanner();
         Actions actions = new Actions(scanner);
+        // 自动归因只在 root 下可用（shell 无权采样其他进程）
+        autoProfiler = Os.getuid() == 0 ? new AutoProfiler(scanner) : null;
+        if (autoProfiler != null) autoProfiler.start();
         out.println("@@READY");
         out.flush();
         try (BufferedReader in = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
@@ -67,9 +70,11 @@ public final class RootMain {
         return a.length > i ? a[i] : "";
     }
 
+    private static AutoProfiler autoProfiler;
+
     /** 以 shell 身份运行时（Shizuku 模式）没有权限执行的命令前缀。 */
     private static boolean needsRoot(String cmd) {
-        return cmd.startsWith("KSU_") || cmd.startsWith("LSP_") || cmd.equals("PROFILE");
+        return cmd.startsWith("KSU_") || cmd.startsWith("LSP_") || cmd.equals("AUTOPROF");
     }
 
     private static JSONObject handle(String[] a, Scanner s, Actions act) throws Exception {
@@ -80,8 +85,12 @@ public final class RootMain {
             return o;
         }
         switch (a[0]) {
-            case "SNAPSHOT":
-                return s.snapshot();
+            case "SNAPSHOT": {
+                JSONObject snap = s.snapshot();
+                JSONObject prof = autoProfiler == null ? null : autoProfiler.poll();
+                if (prof != null) snap.put("prof", prof);
+                return snap;
+            }
             case "KILL":
                 return act.kill(intArg(a, 1, -1), strArg(a, 2));
             case "FORCESTOP":
@@ -100,8 +109,12 @@ public final class RootMain {
                 return act.setLspEnabled(strArg(a, 1), false);
             case "LSP_ENABLE":
                 return act.setLspEnabled(strArg(a, 1), true);
-            case "PROFILE": // PROFILE <pid 或进程名> <秒数>
-                return Profiler.run(strArg(a, 1), intArg(a, 2, 12));
+            case "AUTOPROF": { // AUTOPROF <1|0>：开关模块自动归因
+                autoProfiler.setEnabled(intArg(a, 1, 1) == 1);
+                JSONObject o = new JSONObject();
+                o.put("ok", true);
+                return o;
+            }
             case "REBOOT":
                 return act.reboot();
             case "PING": {

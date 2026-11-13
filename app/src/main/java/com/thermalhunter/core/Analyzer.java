@@ -30,6 +30,8 @@ public final class Analyzer {
     static final double CPU_NATIVE = 20;      // 非系统关键的 native 进程
     static final double CPU_KSU = 5;          // KSU 模块进程合计
     static final double CPU_LSP_SELF = 8;     // LSP 模块自身进程
+    static final double LSP_MEASURED_BAD = 5;  // 自动归因：模块代码实测占用（单核%）
+    static final double LSP_MEASURED_WARN = 2;
     static final double CPU_KERNEL_WARN = 30; // 内核线程(只提示，不可杀)
     static final double WL_FRAC_BAD = 0.5;    // 后台应用持锁时间占比
     static final double ALARM_PER_MIN_BAD = 6;
@@ -63,6 +65,10 @@ public final class Analyzer {
         /** 注入系统框架时 system_server 的 CPU；所有这类模块共用同一个进程，无法拆分到单个模块。-1 表示不适用。 */
         public double systemCpu = -1;
         public boolean injectsSystem;
+        /** 自动归因实测的模块代码 CPU（单核 %），-1 表示没有实测数据。 */
+        public double measuredCpu = -1;
+        /** 实测明细：{cpu, procs:{进程:cpu}, methods:[{name,cpu}]}。 */
+        public JSONObject measured;
     }
 
     public static final class Result {
@@ -78,6 +84,8 @@ public final class Analyzer {
         public boolean hookOk;
         public long hookAgeSec = -1;
         public int badCount;
+        /** root 进程返回的自动归因状态（可能为 null）。 */
+        public JSONObject prof;
     }
 
     private final ArrayDeque<Map<String, Double>> cpuHistory = new ArrayDeque<>();
@@ -325,6 +333,10 @@ public final class Analyzer {
 
         // ---------------- LSPosed 模块
         JSONObject lsp = s.optJSONObject("lsp");
+        JSONObject prof = s.optJSONObject("prof");
+        r.prof = prof;
+        boolean profOk = prof != null && prof.optBoolean("ok");
+        JSONObject profMods = profOk ? prof.optJSONObject("modules") : null;
         if (lsp != null) {
             JSONArray mods = lsp.optJSONArray("modules");
             if (mods != null) {
@@ -372,20 +384,36 @@ public final class Analyzer {
                         }
                     }
                     e.injectsSystem = injectsSystem;
+                    if (profOk) {
+                        // 有实测数据时：没出现在结果里的模块即实测为 0（宿主空闲或模块代码没在运行）
+                        e.measured = profMods == null ? null : profMods.optJSONObject(e.lspPkg);
+                        e.measuredCpu = e.measured == null ? 0 : e.measured.optDouble("cpu", 0);
+                    }
                     e.sub = "作用域 " + e.scopes.size() + " 个，运行中 " + e.scopeRunning + " 个";
                     if (!e.enabled) e.tags.add("已禁用");
                     if (injectsSystem) e.tags.add("注入系统框架");
                     if (e.scopes.size() >= 30) e.tags.add("作用域过大");
                     if (e.enabled && !e.isSelf) {
                         if (e.cpuAvg >= CPU_LSP_SELF && e.minAdj > 0) bad(e, "模块自身后台进程 CPU " + fmt(e.cpuAvg) + "%");
-                        if (!badScoped.isEmpty()) warn(e, "作用域内异常应用: " + join(badScoped) + "（宿主本身也可能就是热源，可禁用此模块对比）");
-                        if (injectsSystem && systemServer != null && systemServer.cpuAvg >= 15) {
+                        if (e.measuredCpu >= 0) {
+                            // 实测：按调用栈归属到本模块的 CPU
+                            String where = topProc(e.measured);
+                            if (e.measuredCpu >= LSP_MEASURED_BAD) {
+                                bad(e, "模块代码实测占用 " + fmt(e.measuredCpu) + "% 单核" + where);
+                            } else if (e.measuredCpu >= LSP_MEASURED_WARN) {
+                                warn(e, "模块代码实测占用 " + fmt(e.measuredCpu) + "% 单核" + where);
+                            }
+                        } else if (!badScoped.isEmpty()) {
+                            warn(e, "作用域内异常应用: " + join(badScoped) + "（宿主本身也可能就是热源，可禁用此模块对比）");
+                        }
+                        if (e.measuredCpu < 0 && injectsSystem && systemServer != null && systemServer.cpuAvg >= 15) {
                             // 只作提示，不标记可疑：无法确定是哪一个模块造成的
                             e.warnings.add("system_server CPU " + fmt(systemServer.cpuAvg) + "%，由所有注入系统框架的模块共用，"
                                     + "无法区分各模块的实际占用；如怀疑可逐个禁用后重启对比");
                         }
                     }
-                    e.heat = e.scopeCpu * 0.3 + e.cpuAvg + (e.level == BAD ? 1000 : e.level == WARN ? 100 : 0) + (e.enabled ? 1 : 0);
+                    e.heat = (e.measuredCpu >= 0 ? e.measuredCpu * 10 : e.scopeCpu * 0.3) + e.cpuAvg
+                            + (e.level == BAD ? 1000 : e.level == WARN ? 100 : 0) + (e.enabled ? 1 : 0);
                     r.lsp.add(e);
                 }
                 Collections.sort(r.lsp, (x, y) -> Double.compare(y.heat, x.heat));
@@ -410,6 +438,22 @@ public final class Analyzer {
         for (Entity e : r.ksu) if (e.level == BAD && !e.pids.isEmpty()) out.add(e);
         for (Entity e : r.lsp) if (e.level == BAD && !e.isProtected) out.add(e);
         return out;
+    }
+
+    /** 实测明细里占用最多的宿主进程，如 "（主要在 system_server）"。 */
+    private static String topProc(JSONObject measured) {
+        JSONObject procs = measured == null ? null : measured.optJSONObject("procs");
+        if (procs == null) return "";
+        String best = null;
+        double v = -1;
+        for (Iterator<String> it = procs.keys(); it.hasNext(); ) {
+            String k = it.next();
+            if (procs.optDouble(k) > v) {
+                v = procs.optDouble(k);
+                best = k;
+            }
+        }
+        return best == null ? "" : "（主要在 " + best + "）";
     }
 
     static boolean isSocZone(String t) {

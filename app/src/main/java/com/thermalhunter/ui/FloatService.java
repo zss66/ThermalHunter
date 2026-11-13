@@ -32,6 +32,9 @@ import com.thermalhunter.core.Monitor;
 
 import org.json.JSONObject;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -272,10 +275,14 @@ public class FloatService extends Service implements Monitor.Listener {
                     : "充电 " + Math.abs(bat.optLong("currentMa")) + " mA");
         }
         if (collapsed) return;
+        // 进程 / 应用按 CPU，LSP 模块按自动归因的实测 CPU，一起排序取前几名
+        List<Entity> items = new ArrayList<>();
+        for (Entity e : r.heat) if (e.cpuAvg >= 0.5 || e.level != Analyzer.OK) items.add(e);
+        for (Entity e : r.lsp) if (e.measuredCpu >= 0.5) items.add(e);
+        Collections.sort(items, (a, b) -> Double.compare(value(b), value(a)));
         int n = 0;
-        for (Entity e : r.heat) {
+        for (Entity e : items) {
             if (n >= TOP_N) break;
-            if (e.cpuAvg < 0.5 && e.level == Analyzer.OK) continue;
             bindRow(rowViews[n], e);
             n++;
         }
@@ -300,12 +307,16 @@ public class FloatService extends Service implements Monitor.Listener {
         return new View[]{row, dot, name, val};
     }
 
+    private static double value(Entity e) {
+        return e.type == Analyzer.LSP ? e.measuredCpu : e.cpuAvg;
+    }
+
     private void bindRow(View[] v, Entity e) {
         ((GradientDrawable) v[1].getBackground())
                 .setColor(e.level == Analyzer.OK ? Ui.typeColor(e) : u.levelColor(e.level));
-        ((TextView) v[2]).setText(u.label(e));
+        ((TextView) v[2]).setText(e.type == Analyzer.LSP ? u.label(e) + "（模块）" : u.label(e));
         TextView val = (TextView) v[3];
-        val.setText(Analyzer.fmt(e.cpuAvg) + "%");
+        val.setText(Analyzer.fmt(value(e)) + "%");
         val.setTextColor(e.level == Analyzer.OK ? u.fg : u.levelColor(e.level));
     }
 

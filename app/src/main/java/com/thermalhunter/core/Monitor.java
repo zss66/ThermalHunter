@@ -130,6 +130,18 @@ public final class Monitor {
         kick();
     }
 
+    public boolean autoProfEnabled() {
+        return prefs.getBoolean("auto_prof", true);
+    }
+
+    /** 开关 LSP 模块自动归因（持续低频采样）。 */
+    public void setAutoProf(boolean on) {
+        prefs.edit().putBoolean("auto_prof", on).apply();
+        bg.post(() -> {
+            if (root.isAlive()) root.safeCall("AUTOPROF " + (on ? 1 : 0));
+        });
+    }
+
     /** 依次执行命令，结果回到主线程。 */
     public void runAll(List<String> cmds, Done done) {
         bg.post(() -> {
@@ -171,6 +183,8 @@ public final class Monitor {
                 bg.postDelayed(tickR, RETRY_MS);
                 return;
             }
+            // 新会话：同步 LSP 模块自动归因开关（Shizuku 模式下 root 端会拒绝，忽略即可）
+            root.safeCall("AUTOPROF " + (autoProfEnabled() ? 1 : 0));
         }
         JSONObject snap = root.safeCall("SNAPSHOT");
         if (snap.optBoolean("ok")) {

@@ -26,7 +26,6 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
-import android.widget.ProgressBar;
 import android.widget.Switch;
 import android.widget.TextView;
 
@@ -64,7 +63,7 @@ public class MainActivity extends Activity implements Monitor.Listener {
     private TextView heroLabel, heroTemp, heroTempSub, heroPowerLabel, heroPower, heroPowerSub;
     private LinearLayout hero, clusterRow;
     private ImageView floatBtn;
-    private LinearLayout profileCard;
+    private TextView profStatus;
     private final int[] tabCounts = new int[TABS.length];
     // 只在状态变化时重设背景，避免每次刷新都重绘
     private int[] lastGrad;
@@ -220,27 +219,11 @@ public class MainActivity extends Activity implements Monitor.Listener {
         header.addView(tabs, Ui.lp(-1, -2, 0, u.dp(14), 0, u.dp(4)));
         updateTabs();
 
-        // 深度分析入口（仅 LSP 模块页、root 模式）
-        profileCard = u.col();
-        profileCard.setPadding(u.dp(14), u.dp(12), u.dp(14), u.dp(14));
-        profileCard.setBackground(u.card(u.dp(20)));
-        profileCard.addView(u.text("深度分析模块占用", 14, u.fg, true));
-        TextView pd = u.text("用系统自带的 simpleperf 采样约 12 秒，按调用栈把 CPU 分到具体模块，"
-                + "比上面的宿主占用更接近模块的真实开销。", 12, u.dim, false);
-        pd.setLineSpacing(u.dp(1), 1f);
-        profileCard.addView(pd, Ui.lp(-1, -2, 0, u.dp(4), 0, 0));
-        LinearLayout pb = new LinearLayout(this);
-        TextView ps = pill("分析 system_server", true);
-        ps.setOnClickListener(v -> runProfile("system_server", "system_server"));
-        pb.addView(ps, Ui.weight(1));
-        TextView ph = pill("分析宿主应用…", false);
-        ph.setOnClickListener(v -> pickHost());
-        LinearLayout.LayoutParams phl = Ui.weight(1);
-        phl.leftMargin = u.dp(8);
-        pb.addView(ph, phl);
-        profileCard.addView(pb, Ui.lp(-1, -2, 0, u.dp(10), 0, 0));
-        profileCard.setVisibility(View.GONE);
-        header.addView(profileCard, Ui.lp(-1, -2, 0, u.dp(8), 0, u.dp(4)));
+        // 自动归因状态（仅 LSP 模块页、root 模式）
+        profStatus = u.note("", u.dim);
+        profStatus.setTextSize(12);
+        profStatus.setVisibility(View.GONE);
+        header.addView(profStatus, Ui.lp(-1, -2, 0, u.dp(8), 0, u.dp(4)));
 
         list = new ListView(this);
         list.setDivider(null);
@@ -412,6 +395,9 @@ public class MainActivity extends Activity implements Monitor.Listener {
         if (!shell && lsp != null && !lsp.optBoolean("available") && lsp.has("error")) {
             notes.add("LSPosed：" + lsp.optString("error"));
         }
+        if (!shell && r.prof != null && !r.prof.optBoolean("ok") && mon.autoProfEnabled()) {
+            notes.add("LSP 模块自动归因不可用：" + r.prof.optString("error"));
+        }
         if (notes.isEmpty()) banner.setVisibility(View.GONE);
         else banner(TextUtils.join("\n", notes), shell ? u.accent : u.warn);
 
@@ -440,7 +426,8 @@ public class MainActivity extends Activity implements Monitor.Listener {
                 }
         }
         adapter.set(items);
-        profileCard.setVisibility(tab == 2 && !shell ? View.VISIBLE : View.GONE);
+        profStatus.setVisibility(tab == 2 && !shell ? View.VISIBLE : View.GONE);
+        if (tab == 2 && !shell) profStatus.setText(profStatusText(r));
         emptyText.setText(emptyMessage(shell));
         emptyText.setVisibility(items.isEmpty() ? View.VISIBLE : View.GONE);
     }
@@ -504,6 +491,28 @@ public class MainActivity extends Activity implements Monitor.Listener {
         }
     }
 
+    /** 实测明细里按进程的分布，如 "system_server 3.1% · 微信 0.4%"。 */
+    private String measuredWhere(Entity e, int max) {
+        JSONObject procs = e.measured == null ? null : e.measured.optJSONObject("procs");
+        if (procs == null || procs.length() == 0) return "";
+        List<String> keys = new ArrayList<>();
+        for (java.util.Iterator<String> it = procs.keys(); it.hasNext(); ) keys.add(it.next());
+        java.util.Collections.sort(keys, (a, b) -> Double.compare(procs.optDouble(b), procs.optDouble(a)));
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < keys.size() && i < max; i++) {
+            out.add(procName(keys.get(i)) + " " + Analyzer.fmt(procs.optDouble(keys.get(i))) + "%");
+        }
+        return TextUtils.join(" · ", out);
+    }
+
+    /** 进程名转成可读名称：应用主进程用应用名。 */
+    private String procName(String proc) {
+        String pkg = proc.contains(":") ? proc.substring(0, proc.indexOf(':')) : proc;
+        Object[] info = u.appInfo(pkg);
+        if (info[0] == null) return proc;
+        return proc.contains(":") ? info[0] + proc.substring(proc.indexOf(':')) : (String) info[0];
+    }
+
     /** LSP 模块的作用域里是否有正在运行的普通应用（不含 system_server）。 */
     private static boolean hasAppHost(Entity e) {
         return e.scopeRunning > (e.injectsSystem && e.systemCpu >= 0 ? 1 : 0);
@@ -519,6 +528,8 @@ public class MainActivity extends Activity implements Monitor.Listener {
         List<String> p = new ArrayList<>();
         if (e.type == Analyzer.LSP) {
             p.add(e.sub);
+            String where = measuredWhere(e, 2);
+            if (!where.isEmpty()) p.add(where);
             if (!e.pids.isEmpty()) p.add("自身 CPU " + Analyzer.fmt(e.cpuAvg) + "%");
             return TextUtils.join(" · ", p);
         }
@@ -586,10 +597,32 @@ public class MainActivity extends Activity implements Monitor.Listener {
             if (e.raw.optBoolean("sysprop")) scripts.add("system.prop");
             if (!scripts.isEmpty()) s.add(u.text("脚本：" + TextUtils.join("、", scripts), 13, u.dim, false));
         }
+        if (e.type == Analyzer.LSP && e.measured != null) {
+            JSONObject procs = e.measured.optJSONObject("procs");
+            if (procs != null && procs.length() > 0) {
+                s.section("实测占用分布（单核 %）");
+                JSONArray arr = new JSONArray();
+                for (java.util.Iterator<String> it = procs.keys(); it.hasNext(); ) {
+                    String k = it.next();
+                    try {
+                        arr.put(new JSONObject().put("name", procName(k)).put("cpu", procs.optDouble(k)));
+                    } catch (Exception ignored) {
+                    }
+                }
+                s.add(listBox(arr, 6, "cpu"));
+            }
+            JSONArray methods = e.measured.optJSONArray("methods");
+            if (methods != null && methods.length() > 0) {
+                s.section("最耗时的模块方法（单核 %）");
+                s.add(listBox(methods, 5, "cpu"));
+            }
+        }
         if (e.type == Analyzer.LSP) {
-            s.add(u.note("LSPosed 模块的代码运行在宿主进程里，系统不会单独记录某个模块的 CPU。"
-                    + "上面的「宿主进程 CPU」是宿主的总占用；system_server 由所有注入系统框架的模块共用。"
-                    + "要确认某个模块的影响，可禁用后重启手机，对比前后的温度和功耗。", u.dim),
+            s.add(u.note(e.measuredCpu >= 0
+                    ? "「模块代码实测」来自自动归因：低频采样宿主进程，按调用栈把 CPU 归到模块。"
+                    + "hook 带来的间接开销（如被 hook 的方法无法内联）统计不到，实际影响可能略高。"
+                    : "暂无实测数据：上面的「宿主进程 CPU」是宿主的总占用，system_server 由所有注入系统框架的模块共用。"
+                    + "开启自动归因（root）后会显示模块代码的实测占用。", u.dim),
                     Ui.lp(-1, -2, 0, u.dp(12), 0, 0));
         }
         if (e.type == Analyzer.LSP && !e.scopes.isEmpty()) {
@@ -643,15 +676,6 @@ public class MainActivity extends Activity implements Monitor.Listener {
                     }
                     break;
                 case Analyzer.LSP:
-                    if (!"shell".equals(result.snap.optString("mode"))) {
-                        Entity host = e.injectsSystem ? null : topHost(e);
-                        if (e.injectsSystem || host != null) {
-                            s.action("深度分析（采样约 12 秒）", Sheet.PRIMARY, () -> {
-                                if (host == null) runProfile("system_server", "system_server");
-                                else runProfile(String.valueOf(mainPid(host)), u.label(host));
-                            });
-                        }
-                    }
                     if (e.enabled) {
                         s.action("在 LSPosed 中禁用", Sheet.DANGER, () -> confirm("禁用 LSPosed 模块「" + name + "」？",
                                 "LSPosed 会缓存配置，需要重启手机才会停止注入。", "禁用",
@@ -684,6 +708,7 @@ public class MainActivity extends Activity implements Monitor.Listener {
             return l;
         }
         if (e.type == Analyzer.LSP) {
+            if (e.measuredCpu >= 0) l.add(new Object[]{"模块代码实测", Analyzer.fmt(e.measuredCpu) + "%", lc});
             l.add(new Object[]{"宿主进程 CPU", hasAppHost(e) ? Analyzer.fmt(e.scopeCpu) + "%" : "--", u.fg});
             l.add(new Object[]{"system_server", e.systemCpu >= 0 ? Analyzer.fmt(e.systemCpu) + "%" : "--", u.dim});
             l.add(new Object[]{"模块应用自身", e.pids.isEmpty() ? "未运行" : Analyzer.fmt(e.cpuAvg) + "%", u.fg});
@@ -771,201 +796,24 @@ public class MainActivity extends Activity implements Monitor.Listener {
 
     // ------------------------------------------------------------------ 深度分析
 
-    private TextView pill(String text, boolean primary) {
-        TextView t = u.text(text, 13, primary ? Color.WHITE : u.fg, true);
-        t.setGravity(Gravity.CENTER);
-        t.setSingleLine(true);
-        t.setPadding(u.dp(8), u.dp(10), u.dp(8), u.dp(10));
-        t.setBackground(u.ripple(Ui.round(primary ? u.accent : u.sunken, u.dp(14))));
-        return t;
+    /** LSP 页顶部的自动归因状态说明。 */
+    private String profStatusText(Analyzer.Result r) {
+        if (!mon.autoProfEnabled()) return "自动归因已关闭（可在设置中开启）。下面显示的是宿主进程的占用，不是模块自身的开销。";
+        JSONObject p = r.prof;
+        if (p == null) return "自动归因：正在准备第一轮采样（约 15 秒后出结果）…";
+        if (!p.optBoolean("ok")) return "自动归因不可用，下面显示的是宿主进程的占用。";
+        long age = Math.max(0, (r.snap.optLong("t") - p.optLong("time")) / 1000);
+        String when = age < 5 ? "刚刚更新" : age + " 秒前更新";
+        if (p.has("idle")) return "自动归因：" + p.optString("idle") + "，暂不采样 · " + when;
+        JSONArray t = p.optJSONArray("targets");
+        List<String> names = new ArrayList<>();
+        if (t != null) for (int i = 0; i < t.length(); i++) names.add(t.optString(i));
+        return "自动归因：实测采样 " + TextUtils.join("、", names) + " · " + when + " · 每 "
+                + p.optInt("period", 30) + " 秒一次";
     }
 
-    /** 被 LSP 模块作用的、正在运行的普通应用（不含 system_server），按 CPU 降序。 */
-    private List<Entity> hostApps() {
-        List<Entity> out = new ArrayList<>();
-        if (result == null) return out;
-        java.util.Set<String> scoped = new java.util.HashSet<>();
-        for (Entity m : result.lsp) {
-            JSONArray sc = m.raw == null ? null : m.raw.optJSONArray("scope");
-            if (sc != null) for (int i = 0; i < sc.length(); i++) {
-                JSONObject so = sc.optJSONObject(i);
-                if (so != null) scoped.add(so.optString("pkg"));
-            }
-        }
-        for (Entity e : result.heat) {
-            if (e.type == Analyzer.APP && !e.pids.isEmpty() && scoped.contains(e.pkg)) out.add(e);
-        }
-        java.util.Collections.sort(out, (a, b) -> Double.compare(b.cpuAvg, a.cpuAvg));
-        return out;
-    }
-
-    /** 某个 LSP 模块作用域里 CPU 最高的宿主应用。 */
-    private Entity topHost(Entity lspModule) {
-        JSONArray sc = lspModule.raw == null ? null : lspModule.raw.optJSONArray("scope");
-        if (sc == null) return null;
-        java.util.Set<String> pkgs = new java.util.HashSet<>();
-        for (int i = 0; i < sc.length(); i++) {
-            JSONObject so = sc.optJSONObject(i);
-            if (so != null) pkgs.add(so.optString("pkg"));
-        }
-        for (Entity e : hostApps()) if (pkgs.contains(e.pkg)) return e;
-        return null;
-    }
-
-    /** 应用的主进程（进程名等于包名），找不到时取第一个。 */
-    private static int mainPid(Entity e) {
-        for (int i = 0; i < e.pids.size(); i++) {
-            if (e.pidNames.get(i).split(" ")[0].equals(e.pkg)) return e.pids.get(i);
-        }
-        return e.pids.get(0);
-    }
-
-    private void pickHost() {
-        List<Entity> hosts = hostApps();
-        if (hosts.isEmpty()) {
-            snack("没有正在运行的、被 LSP 模块作用的应用", false);
-            return;
-        }
-        Sheet s = new Sheet(this, u).title("选择要分析的宿主应用", "只列出被 LSPosed 模块作用、且正在运行的应用");
-        for (Entity e : hosts) {
-            String name = u.label(e);
-            LinearLayout r = u.row();
-            r.setPadding(u.dp(12), u.dp(10), u.dp(12), u.dp(10));
-            r.setBackground(u.ripple(Ui.round(u.sunken, u.dp(14))));
-            FrameLayout av = u.avatar(36);
-            u.bindAvatar(av, e, name);
-            r.addView(av, Ui.lp(u.dp(36), u.dp(36), 0, 0, u.dp(10), 0));
-            r.addView(u.text(name, 14, u.fg, true), Ui.weight(1));
-            r.addView(u.text(Analyzer.fmt(e.cpuAvg) + "%", 13, u.dim, false));
-            r.setOnClickListener(v -> {
-                s.dismiss();
-                runProfile(String.valueOf(mainPid(e)), name);
-            });
-            s.add(r);
-        }
-        s.action("取消", Sheet.NORMAL, null).show();
-    }
-
-    private void runProfile(String target, String label) {
-        Sheet wait = new Sheet(this, u).cancelable(false)
-                .title("正在深度分析…", "正在对「" + label + "」采样约 12 秒，随后解析调用栈，一般需要 20～60 秒。"
-                        + "期间实时数据暂停刷新。");
-        ProgressBar bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        bar.setIndeterminate(true);
-        bar.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(u.accent));
-        wait.add(bar, Ui.lp(-1, -2, 0, u.dp(16), 0, u.dp(4)));
-        wait.show();
-        mon.call("PROFILE " + target + " 12", r -> {
-            wait.dismiss();
-            if (!r.optBoolean("ok")) {
-                new Sheet(this, u).title("深度分析失败", null)
-                        .add(u.note(r.optString("error"), u.bad), Ui.lp(-1, -2, 0, u.dp(12), 0, 0))
-                        .action("好", Sheet.PRIMARY, null).show();
-                return;
-            }
-            showProfile(r, label);
-        });
-    }
-
-    private void showProfile(JSONObject r, String label) {
-        double procCpu = r.optDouble("procCpu", -1);
-        String sub = "采样 " + r.optInt("seconds") + " 秒 · " + r.optLong("samples") + " 个样本"
-                + (procCpu >= 0 ? " · 期间进程平均占用 " + Analyzer.fmt(procCpu) + "%（单核）" : "");
-        Sheet s = new Sheet(this, u).title("深度分析 · " + label, sub);
-
-        JSONArray mods = r.optJSONArray("modules");
-        s.section("LSPosed 模块（占该进程 CPU 的比例）");
-        if (mods == null || mods.length() == 0) {
-            s.add(u.note("采样期间没有发现任何模块的代码在运行，说明这段时间该进程的占用基本来自系统自身。", u.good));
-        } else {
-            for (int i = 0; i < mods.length(); i++) {
-                JSONObject m = mods.optJSONObject(i);
-                String pkg = m.optString("pkg");
-                Entity fake = new Entity();
-                fake.type = Analyzer.LSP;
-                fake.pkg = pkg;
-                fake.title = pkg;
-                double pct = m.optDouble("pct");
-                List<String> methods = new ArrayList<>();
-                JSONArray ms = m.optJSONArray("methods");
-                if (ms != null) for (int k = 0; k < ms.length() && k < 3; k++) {
-                    JSONObject mo = ms.optJSONObject(k);
-                    methods.add(Analyzer.fmt(mo.optDouble("pct")) + "%  " + mo.optString("name"));
-                }
-                s.add(shareRow(fake, u.label(fake), pct, procCpu, pct >= 10 ? u.bad : pct >= 3 ? u.warn : u.accent, methods));
-            }
-        }
-        double bridge = r.optDouble("bridge"), amb = r.optDouble("ambiguous"), sys = r.optDouble("system");
-        if (bridge > 0) s.add(shareRow(null, "LSPosed 框架转发", bridge, procCpu, u.dim, null));
-        if (amb > 0) {
-            List<String> d = new ArrayList<>();
-            JSONArray ad = r.optJSONArray("ambiguousDetail");
-            if (ad != null) for (int i = 0; i < ad.length(); i++) {
-                JSONObject o = ad.optJSONObject(i);
-                d.add(Analyzer.fmt(o.optDouble("pct")) + "%  " + o.optString("modules"));
-            }
-            s.add(shareRow(null, "无法区分（多个模块共有的代码）", amb, procCpu, u.warn, d));
-        }
-        s.add(shareRow(null, "系统自身", sys, procCpu, u.good, null));
-
-        JSONArray sm = r.optJSONArray("systemMethods");
-        if (sm != null && sm.length() > 0) {
-            s.section("系统自身最耗时的方法");
-            s.add(listBox(sm, 6));
-        }
-        JSONArray th = r.optJSONArray("threads");
-        if (th != null && th.length() > 0) {
-            s.section("最忙的线程");
-            s.add(listBox(th, 5));
-        }
-        if (r.optDouble("javaFrames", 100) < 30) {
-            s.add(u.note("大部分样本没有解析出 Java 方法名，模块归属可能不完整。", u.warn), Ui.lp(-1, -2, 0, u.dp(14), 0, 0));
-        }
-        s.add(u.note("比例是采样期间该进程 CPU 时间里各部分的占比；「≈单核」= 进程平均占用 × 比例。"
-                + "hook 带来的间接开销（如被 hook 的方法无法内联）统计不到，结果会略微低估模块的影响。", u.dim),
-                Ui.lp(-1, -2, 0, u.dp(14), 0, 0));
-        s.action("好", Sheet.PRIMARY, null).show();
-    }
-
-    /** 深度分析结果的一行：名称、占比、约合单核占用、比例条，以及可选的明细。 */
-    private View shareRow(Entity e, String name, double pct, double procCpu, int color, List<String> details) {
-        LinearLayout box = u.col();
-        box.setPadding(u.dp(12), u.dp(10), u.dp(12), u.dp(10));
-        box.setBackground(Ui.round(u.sunken, u.dp(14)));
-        LinearLayout r = u.row();
-        if (e != null) {
-            FrameLayout av = u.avatar(32);
-            u.bindAvatar(av, e, name);
-            r.addView(av, Ui.lp(u.dp(32), u.dp(32), 0, 0, u.dp(10), 0));
-        }
-        TextView n = u.text(name, 14, u.fg, true);
-        n.setSingleLine(true);
-        n.setEllipsize(TextUtils.TruncateAt.END);
-        r.addView(n, Ui.weight(1));
-        LinearLayout vc = u.col();
-        vc.setGravity(Gravity.END);
-        TextView v = u.text(Analyzer.fmt(pct) + "%", 16, color == u.dim ? u.fg : color, true);
-        v.setFontFeatureSettings("tnum");
-        vc.addView(v);
-        if (procCpu >= 0) vc.addView(u.text("≈" + Analyzer.fmt(procCpu * pct / 100) + "% 单核", 10, u.dim, false));
-        r.addView(vc, Ui.lp(-2, -2, u.dp(8), 0, 0, 0));
-        box.addView(r);
-        Ui.Bar bar = new Ui.Bar(this, u.track);
-        bar.set((float) (pct / 100), color);
-        box.addView(bar, Ui.lp(-1, u.dp(4), 0, u.dp(8), 0, 0));
-        if (details != null) for (String d : details) {
-            TextView t = u.text(d, 11, u.dim, false);
-            t.setSingleLine(true);
-            t.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-            box.addView(t, Ui.lp(-1, -2, 0, u.dp(4), 0, 0));
-        }
-        LinearLayout wrap = new LinearLayout(this);
-        wrap.addView(box, new LinearLayout.LayoutParams(-1, -2));
-        return wrap;
-    }
-
-    /** {name, pct} 列表。 */
-    private View listBox(JSONArray arr, int max) {
+    /** {name, valueKey} 列表，数值显示为百分比。 */
+    private View listBox(JSONArray arr, int max, String valueKey) {
         LinearLayout box = u.col();
         box.setPadding(u.dp(12), u.dp(8), u.dp(12), u.dp(8));
         box.setBackground(Ui.round(u.sunken, u.dp(14)));
@@ -976,7 +824,7 @@ public class MainActivity extends Activity implements Monitor.Listener {
             n.setSingleLine(true);
             n.setEllipsize(TextUtils.TruncateAt.START);
             r.addView(n, Ui.weight(1));
-            TextView v = u.text(Analyzer.fmt(o.optDouble("pct")) + "%", 12, u.dim, false);
+            TextView v = u.text(Analyzer.fmt(o.optDouble(valueKey)) + "%", 12, u.dim, false);
             v.setFontFeatureSettings("tnum");
             r.addView(v, Ui.lp(-2, -2, u.dp(8), 0, 0, 0));
             box.addView(r, Ui.lp(-1, -2, 0, i > 0 ? u.dp(5) : 0, 0, 0));
@@ -1106,6 +954,12 @@ public class MainActivity extends Activity implements Monitor.Listener {
                     s.dismiss();
                     if (on != FloatService.isRunning()) toggleFloat();
                 }));
+
+        s.section("LSP 模块");
+        s.add(switchRow("自动归因模块占用（root）",
+                "用系统自带的 simpleperf 每 30 秒低频采样一次注入模块的进程，按调用栈算出每个模块实际消耗的 CPU；"
+                        + "会额外占用少量 CPU，只在界面或悬浮窗开启时运行",
+                mon.autoProfEnabled(), on -> mon.setAutoProf(on)));
 
         s.section("一键清理");
         s.add(switchRow("同时处理前台应用", "默认只处理后台的异常应用",
@@ -1295,8 +1149,12 @@ public class MainActivity extends Activity implements Monitor.Listener {
                 h.value.setText(e.wlFrac >= 0 ? Math.round(e.wlFrac * 100) + "%" : "--");
                 h.caption.setText("持锁");
                 frac = Math.max(0, e.wlFrac);
+            } else if (e.type == Analyzer.LSP && e.measuredCpu >= 0) {
+                h.value.setText(Analyzer.fmt(e.measuredCpu) + "%");
+                h.caption.setText("实测 CPU");
+                frac = e.measuredCpu / 100;
             } else if (e.type == Analyzer.LSP) {
-                // 模块自身在宿主进程里的开销无法单独统计；显示宿主进程的占用并注明
+                // 没有实测数据：显示宿主进程的占用并注明
                 if (hasAppHost(e)) {
                     h.value.setText(Analyzer.fmt(e.scopeCpu) + "%");
                     h.caption.setText("宿主进程 CPU");
@@ -1316,7 +1174,7 @@ public class MainActivity extends Activity implements Monitor.Listener {
                 frac = e.cpuAvg / 100;
             }
             int lc = u.levelColor(e.level);
-            boolean sharedOnly = e.type == Analyzer.LSP && !hasAppHost(e);
+            boolean sharedOnly = e.type == Analyzer.LSP && e.measuredCpu < 0 && !hasAppHost(e);
             h.value.setTextColor(sharedOnly ? u.dim : e.level == Analyzer.OK ? u.fg : lc);
             h.bar.set((float) Math.min(1, frac), lc);
 
