@@ -17,12 +17,15 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.text.Editable;
 import android.text.TextUtils;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.BaseAdapter;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -1140,6 +1143,20 @@ public class MainActivity extends Activity implements Monitor.Listener {
         PackageManager pm = getPackageManager();
         java.util.Set<String> working = new java.util.HashSet<>(selected);
         Sheet s = new Sheet(this, u).title("VPN 隐身", "勾选的应用在运行时将检测不到 VPN（仍需在 LSPosed 作用域里包含它们）");
+
+        // 固定在顶部的搜索框
+        EditText search = new EditText(this);
+        search.setHint("搜索应用名或包名");
+        search.setSingleLine(true);
+        search.setTextSize(14);
+        search.setTextColor(u.fg);
+        search.setHintTextColor(u.dim);
+        search.setBackground(Ui.round(u.sunken, u.dp(12)));
+        search.setPadding(u.dp(14), u.dp(11), u.dp(14), u.dp(11));
+
+        LinearLayout list = u.col();
+        final List<View> rows = new ArrayList<>();
+        final List<String> keys = new ArrayList<>();
         for (ApplicationInfo ai : apps) {
             String pkg = ai.packageName;
             String label = pm.getApplicationLabel(ai).toString();
@@ -1170,8 +1187,32 @@ public class MainActivity extends Activity implements Monitor.Listener {
             });
             r.addView(sw, Ui.lp(-2, -2, u.dp(8), 0, 0, 0));
             r.setOnClickListener(v -> sw.toggle());
-            s.add(r);
+            list.addView(r, Ui.lp(-1, -2, 0, rows.isEmpty() ? 0 : u.dp(8), 0, 0));
+            rows.add(r);
+            keys.add((label + " " + pkg).toLowerCase(Locale.ROOT));
         }
+        TextView empty = u.text("没有匹配的应用", 13, u.dim, false);
+        empty.setPadding(0, u.dp(16), 0, 0);
+        empty.setVisibility(View.GONE);
+        list.addView(empty);
+
+        search.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence x, int a, int b, int c) {}
+            public void onTextChanged(CharSequence x, int a, int b, int c) {}
+            public void afterTextChanged(Editable e) {
+                String q = e.toString().trim().toLowerCase(Locale.ROOT);
+                int shown = 0;
+                for (int i = 0; i < rows.size(); i++) {
+                    boolean match = q.isEmpty() || keys.get(i).contains(q);
+                    rows.get(i).setVisibility(match ? View.VISIBLE : View.GONE);
+                    if (match) shown++;
+                }
+                empty.setVisibility(shown == 0 ? View.VISIBLE : View.GONE);
+            }
+        });
+
+        s.pin(search);
+        s.add(list);
         s.action("保存", Sheet.PRIMARY, () -> {
             hidePrefs().edit().putStringSet("vpn_pkgs", working).apply();
             snack(working.isEmpty() ? "已清空 VPN 隐身列表"

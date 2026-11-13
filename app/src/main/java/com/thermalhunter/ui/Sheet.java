@@ -21,12 +21,13 @@ final class Sheet {
 
     private final Ui u;
     private final Dialog dialog;
-    private final LinearLayout body, actions;
+    private final LinearLayout body, actions, panel;
+    private final ScrollView sv;
 
     Sheet(Context ctx, Ui u) {
         this.u = u;
         dialog = new Dialog(ctx, R.style.SheetTheme);
-        LinearLayout panel = u.col();
+        panel = u.col();
         GradientDrawable bgd = new GradientDrawable();
         bgd.setColor(u.card);
         float r = u.dp(26);
@@ -41,7 +42,7 @@ final class Sheet {
         hl.bottomMargin = u.dp(14);
         panel.addView(handle, hl);
 
-        ScrollView sv = new ScrollView(ctx);
+        sv = new ScrollView(ctx);
         sv.setVerticalScrollBarEnabled(false);
         body = u.col();
         sv.addView(body, new ViewGroup.LayoutParams(-1, -2));
@@ -123,6 +124,12 @@ final class Sheet {
     Sheet cancelable(boolean c) {
         dialog.setCancelable(c);
         dialog.setCanceledOnTouchOutside(c);
+        return this;
+    }
+
+    /** 固定在滚动区上方、不随列表滚动的视图（如搜索框）。 */
+    Sheet pin(View v) {
+        panel.addView(v, panel.indexOfChild(sv), Ui.lp(-1, -2, 0, 0, 0, u.dp(10)));
         return this;
     }
 
