@@ -75,7 +75,8 @@ public class HookEntry implements IXposedHookLoadPackage {
             prefs.makeWorldReadable();
             prefs.reload();
             Set<String> set = prefs.getStringSet("vpn_pkgs", null);
-            return set != null && set.contains(pkg);
+            // 读不到配置（SELinux 跨进程）时兜底生效：模块只会被挂进用户在作用域里选的应用
+            return set == null || set.contains(pkg);
         } catch (Throwable t) {
             return false;
         }
@@ -134,6 +135,20 @@ public class HookEntry implements IXposedHookLoadPackage {
                                 kept.add(ni);
                             }
                             param.setResult(Collections.enumeration(kept));
+                        }
+                    });
+        } catch (Throwable ignored) {
+        }
+        try {
+            // 直接按名查接口（如 getByName("tun0")）：命中 VPN 接口名则返回 null
+            XposedHelpers.findAndHookMethod("java.net.NetworkInterface", null, "getByName",
+                    String.class, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            String n = (String) param.args[0];
+                            if (n != null && (n.startsWith("tun") || n.startsWith("ppp") || n.startsWith("tap"))) {
+                                param.setResult(null);
+                            }
                         }
                     });
         } catch (Throwable ignored) {
