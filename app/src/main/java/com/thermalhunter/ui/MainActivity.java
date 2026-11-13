@@ -719,8 +719,15 @@ public class MainActivity extends Activity implements Monitor.Listener {
         }
         if (e.type == Analyzer.KSU && e.measuredCpu >= 0) {
             l.add(new Object[]{"注入代码实测", Analyzer.fmt(e.measuredCpu) + "%", lc});
+            if (e.pids.isEmpty()) {
+                // 只有注入代码、没有自己进程的模块（如 Zygisk 模块），进程相关的数据块没有意义
+                l.add(new Object[]{"模块自身进程", "未运行", u.fg});
+                return l;
+            }
         }
-        l.add(new Object[]{e.type == Analyzer.KSU ? "模块进程 CPU" : "CPU（15秒均值）", Analyzer.fmt(e.cpuAvg) + "%", lc});
+        boolean ownCpuFlagged = e.type != Analyzer.KSU || e.cpuAvg >= 5;
+        l.add(new Object[]{e.type == Analyzer.KSU ? "模块进程 CPU" : "CPU（15秒均值）", Analyzer.fmt(e.cpuAvg) + "%",
+                ownCpuFlagged ? lc : u.fg});
         l.add(new Object[]{"估算功耗", e.powerMw > 0 ? e.powerMw + " mW" : "--", u.fg});
         l.add(new Object[]{"内存", e.rssKb > 0 ? e.rssKb / 1024 + " MB" : "--", u.fg});
         l.add(new Object[]{"进程数", String.valueOf(e.pids.size()), u.fg});
