@@ -1,5 +1,7 @@
 package com.thermalhunter.core;
 
+import com.thermalhunter.root.T;
+import com.thermalhunter.R;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -31,18 +33,20 @@ public final class DrainStats {
 
     private static final long MIN = 60_000L, HOUR = 3_600_000L;
 
-    /** batterystats 中各耗电组件的 checkin 标签 → 中文名。 */
+    /** batterystats 中各耗电组件的 checkin 标签 → 名称（root 端解析，存为文字令牌，App 端再翻译）。 */
     private static final Map<String, String> COMPONENTS = new HashMap<>();
 
     static {
         String[] kv = {
-                "scrn", "屏幕", "cpu", "CPU", "blue", "蓝牙", "camera", "相机", "cam", "相机",
-                "audio", "音频", "video", "视频", "flashlight", "手电筒", "flash", "手电筒",
-                "cell", "移动网络", "radio", "移动网络", "sensors", "传感器", "gnss", "定位",
-                "gps", "定位", "wifi", "WLAN", "memory", "内存", "phone", "通话", "ambi", "息屏显示",
-                "idle", "待机", "wakelock", "唤醒锁", "user", "其他用户", "unacc", "未统计", "over", "高估",
+                "scrn", "comp_screen", "blue", "comp_bt", "camera", "comp_camera", "cam", "comp_camera",
+                "audio", "comp_audio", "video", "comp_video", "flashlight", "comp_flashlight", "flash", "comp_flashlight",
+                "cell", "comp_cell", "radio", "comp_cell", "sensors", "comp_sensors", "gnss", "comp_location",
+                "gps", "comp_location", "wifi", "comp_wifi", "memory", "comp_memory", "phone", "comp_phone", "ambi", "comp_aod",
+                "idle", "comp_idle", "wakelock", "comp_wakelock", "user", "comp_other_users", "unacc", "comp_unaccounted",
+                "over", "comp_overcounted",
         };
-        for (int i = 0; i < kv.length; i += 2) COMPONENTS.put(kv[i], kv[i + 1]);
+        COMPONENTS.put("cpu", "CPU");
+        for (int i = 0; i < kv.length; i += 2) COMPONENTS.put(kv[i], T.k(kv[i + 1]));
     }
 
     private static final class Uid {
@@ -177,7 +181,7 @@ public final class DrainStats {
         JSONObject o = new JSONObject();
         if (!any || bt == null) {
             o.put("ok", false);
-            o.put("error", "读取不到 batterystats 数据");
+            o.put("error", T.k("ds_no_data"));
             return o;
         }
         o.put("ok", true);
@@ -278,20 +282,17 @@ public final class DrainStats {
 
         if (screenOff >= HOUR && offRate >= 0) {
             if (offRate >= 3) {
-                issues.put(issue(BAD, "standby", String.format(Locale.US,
-                        "熄屏待机掉电 %.1f%%/小时，明显偏快（正常一般低于 1%%/小时）", offRate)));
+                issues.put(issue(BAD, "standby", L.s(R.string.ds_standby_bad, String.format(Locale.US, "%.1f", offRate))));
             } else if (offRate >= 1.5) {
-                issues.put(issue(WARN, "standby", String.format(Locale.US,
-                        "熄屏待机掉电 %.1f%%/小时，偏快（正常一般低于 1%%/小时）", offRate)));
+                issues.put(issue(WARN, "standby", L.s(R.string.ds_standby_warn, String.format(Locale.US, "%.1f", offRate))));
             }
         }
         if (screenOff >= HOUR && awake >= 0) {
             int pct = (int) Math.round(awake * 100);
             if (awake >= 0.4) {
-                issues.put(issue(BAD, "awake", "熄屏后有 " + pct + "% 的时间 CPU 未能进入深睡，"
-                        + "通常是应用持有唤醒锁或频繁唤醒"));
+                issues.put(issue(BAD, "awake", L.s(R.string.ds_awake_bad, pct)));
             } else if (awake >= 0.15) {
-                issues.put(issue(WARN, "awake", "熄屏后有 " + pct + "% 的时间 CPU 处于唤醒状态（理想值低于 10%）"));
+                issues.put(issue(WARN, "awake", L.s(R.string.ds_awake_warn, pct)));
             }
         }
 
@@ -334,44 +335,44 @@ public final class DrainStats {
         double mah = a.optDouble("mah", 0);
         double share = mah / uidTotal;
         // 前台服务（音乐、导航、录音等）在后台运行是用户预期的：相关项最多标为「可疑」
-        String fgsNote = fgs >= 30 * MIN ? "（有前台服务 " + dur(fgs) + "，如在听歌 / 导航属正常）" : "";
+        String fgsNote = fgs >= 30 * MIN ? L.s(R.string.ds_fgs_note, dur(fgs)) : "";
 
         // 后台唤醒锁：优先用系统统计的后台持锁时长；没有该字段时，前台很少却持锁很久也算
         long bgWl = a.optLong("bgWlMs");
         if (bgWl <= 0 && a.optLong("wlMs") > top * 2) bgWl = a.optLong("wlMs") - top;
         double wlFrac = bgWl / (double) onBattery;
         if (bgWl >= 20 * MIN && wlFrac >= 0.15) {
-            if (fgs >= bgWl * 0.8) warn.add("后台持唤醒锁 " + dur(bgWl) + fgsNote);
-            else bad.add("后台持唤醒锁 " + dur(bgWl) + "（占放电时长 " + Math.round(wlFrac * 100) + "%），阻止手机深睡");
+            if (fgs >= bgWl * 0.8) warn.add(L.s(R.string.ds_bg_wl, dur(bgWl)) + fgsNote);
+            else bad.add(L.s(R.string.ds_bg_wl_bad, dur(bgWl), Math.round(wlFrac * 100)));
         } else if (bgWl >= 10 * MIN && wlFrac >= 0.05) {
-            warn.add("后台持唤醒锁 " + dur(bgWl) + "（占放电时长 " + Math.round(wlFrac * 100) + "%）");
+            warn.add(L.s(R.string.ds_bg_wl_warn, dur(bgWl), Math.round(wlFrac * 100)));
         }
 
         long alarms = a.optLong("alarms");
         double perHour = hours > 0 ? alarms / hours : 0;
         if (alarms >= 30 && perHour >= 30) {
-            bad.add(String.format(Locale.US, "唤醒闹钟 %d 次（%.0f 次/小时），频繁把手机从休眠中唤醒", alarms, perHour));
+            bad.add(L.s(R.string.ds_alarms_bad, alarms, String.format(Locale.US, "%.0f", perHour)));
         } else if (alarms >= 20 && perHour >= 10) {
-            warn.add(String.format(Locale.US, "唤醒闹钟 %d 次（%.0f 次/小时）", alarms, perHour));
+            warn.add(L.s(R.string.ds_alarms_warn, alarms, String.format(Locale.US, "%.0f", perHour)));
         }
 
         long gps = a.optLong("gpsMs");
         if (gps >= 30 * MIN && gps > top * 2) {
-            (gps >= 2 * HOUR ? bad : warn).add("后台定位累计 " + dur(gps));
+            (gps >= 2 * HOUR ? bad : warn).add(L.s(R.string.ds_bg_gps, dur(gps)));
         }
 
         long cpu = a.optLong("cpuMs");
         if (cpu > top + fgs + 30 * MIN) {
             long bgCpu = cpu - top - fgs;
-            (bgCpu >= 90 * MIN ? bad : warn).add("CPU 运行 " + dur(cpu) + "，远超前台使用时长 " + dur(top) + "，主要在后台运行");
+            (bgCpu >= 90 * MIN ? bad : warn).add(L.s(R.string.ds_bg_cpu, dur(cpu), dur(top)));
         }
 
         if (top < 15 * MIN && mah >= 30 && share >= 0.08) {
-            (fgsNote.isEmpty() ? bad : warn).add(String.format(Locale.US, "几乎没在前台使用（%s），却耗电 %.0f mAh（占应用总耗电 %d%%）",
-                    dur(top), mah, Math.round(share * 100)) + fgsNote);
+            (fgsNote.isEmpty() ? bad : warn).add(L.s(R.string.ds_unused_drain,
+                    dur(top), String.format(Locale.US, "%.0f", mah), Math.round(share * 100)) + fgsNote);
         } else if (top < 15 * MIN && mah >= 15 && share >= 0.04) {
-            warn.add(String.format(Locale.US, "前台使用仅 %s，后台耗电 %.0f mAh（占 %d%%）",
-                    dur(top), mah, Math.round(share * 100)));
+            warn.add(L.s(R.string.ds_low_fg_drain,
+                    dur(top), String.format(Locale.US, "%.0f", mah), Math.round(share * 100)));
         }
     }
 
@@ -392,9 +393,9 @@ public final class DrainStats {
 
     public static String dur(long ms) {
         long m = ms / MIN;
-        if (m < 1) return (ms / 1000) + "秒";
-        if (m < 60) return m + "分钟";
-        return (m / 60) + "时" + (m % 60) + "分";
+        if (m < 1) return L.s(R.string.dur_s, ms / 1000);
+        if (m < 60) return L.s(R.string.dur_min, m);
+        return L.s(R.string.dur_hm, m / 60, m % 60);
     }
 
     private static Uid uid(Map<Integer, Uid> m, int uid) {

@@ -133,6 +133,12 @@ final class Sheet {
         return this;
     }
 
+    /** 面板关闭（按钮、返回键或点外部）时回调。 */
+    Sheet onDismiss(Runnable r) {
+        dialog.setOnDismissListener(d -> r.run());
+        return this;
+    }
+
     void show() {
         actions.setVisibility(actions.getChildCount() == 0 ? View.GONE : View.VISIBLE);
         dialog.show();

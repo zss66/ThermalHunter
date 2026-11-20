@@ -1,5 +1,6 @@
 package com.thermalhunter.core;
 
+import com.thermalhunter.R;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -35,6 +36,11 @@ public final class Monitor {
         /** 是否需要较快的刷新（主界面 3 秒；只有悬浮窗时放宽到 5 秒以省电）。 */
         default boolean wantsFast() {
             return true;
+        }
+
+        /** 是否需要 LSP 模块自动归因（simpleperf 采样）。只有主界面需要，悬浮窗不显示这些数据。 */
+        default boolean wantsProfiling() {
+            return false;
         }
     }
 
@@ -201,7 +207,8 @@ public final class Monitor {
             int lockFps = prefs.getInt("lock_fps", 0);
             if (lockFps > 0) root.safeCall("REFRESH_SET " + lockFps);
         }
-        JSONObject snap = root.safeCall("SNAPSHOT");
+        // 没人需要自动归因时告诉 root 端，20 秒后它就停止 simpleperf 采样
+        JSONObject snap = root.safeCall(profilingWanted() ? "SNAPSHOT" : "SNAPSHOT 0");
         if (snap.optBoolean("ok")) {
             fillBattery(snap);
             Analyzer.Result r = analyzer.update(snap);
@@ -210,9 +217,14 @@ public final class Monitor {
                 for (Listener l : listeners) l.onUpdate(r);
             });
         } else {
-            status("采集失败：" + snap.optString("error"), true);
+            status(L.s(R.string.st_collect_failed, snap.optString("error")), true);
         }
         if (!listeners.isEmpty()) bg.postDelayed(tickR, interval());
+    }
+
+    private boolean profilingWanted() {
+        for (Listener l : listeners) if (l.wantsProfiling()) return true;
+        return false;
     }
 
     private long interval() {
@@ -225,34 +237,34 @@ public final class Monitor {
         String mode = prefs.getString("work_mode", "auto");
         String rootErr = null;
         if (mode.equals("root") || (mode.equals("auto") && !rootFailed)) {
-            status("正在获取 root 权限…", false);
+            status(L.s(R.string.st_getting_root), false);
             if (root.start(app, false)) return null;
             rootErr = root.lastError();
             if (mode.equals("root")) {
-                return "未获得 root：" + rootErr + "\n请在 KernelSU 管理器 → 超级用户 中允许「热源猎手」，然后重新打开。";
+                return L.s(R.string.err_no_root_mode, rootErr);
             }
             rootFailed = true;
         } else if (mode.equals("auto")) {
-            rootErr = "未授予";
+            rootErr = L.s(R.string.err_not_granted);
         }
         String why = ShizukuShell.unavailableReason();
         if (why == null && !ShizukuShell.granted()) {
             if (ShizukuShell.permanentlyDenied()) {
-                why = "Shizuku 授权已被拒绝：请在 Shizuku → 授权应用管理 中允许「热源猎手」";
+                why = L.s(R.string.err_shizuku_denied);
             } else {
                 if (!shizukuAsked) {
                     shizukuAsked = true;
                     ui.post(ShizukuShell::request);
                 }
-                why = "请在弹出的 Shizuku 对话框中允许「热源猎手」";
+                why = L.s(R.string.err_shizuku_allow);
             }
         }
         if (why == null) {
-            status("正在通过 Shizuku 启动…", false);
+            status(L.s(R.string.st_starting_shizuku), false);
             if (root.start(app, true)) return null;
-            why = "Shizuku 启动采集进程失败：" + root.lastError();
+            why = L.s(R.string.err_shizuku_start, root.lastError());
         }
-        if (rootErr != null) return "未获得 root：" + rootErr + "\n" + why;
+        if (rootErr != null) return L.s(R.string.err_no_root_then, rootErr, why);
         return why;
     }
 

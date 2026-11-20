@@ -1,5 +1,6 @@
 package com.thermalhunter.core;
 
+import com.thermalhunter.R;
 import android.content.Context;
 
 import org.json.JSONObject;
@@ -84,19 +85,18 @@ public final class RootSession {
             while ((line = readLineTimeout(deadline)) != null) {
                 if (line.equals("@@READY")) return true;
             }
-            if (lastError.isEmpty()) lastError = shizuku ? "后台进程没有启动"
-                    : "su 被拒绝或不可用（请在 KernelSU 管理器中授予本应用超级用户权限）";
+            if (lastError.isEmpty()) lastError = L.s(shizuku ? R.string.err_bg_not_started : R.string.err_su_denied);
             close();
             return false;
         } catch (IOException e) {
-            lastError = (shizuku ? "无法通过 Shizuku 启动: " : "无法执行 su: ") + e.getMessage();
+            lastError = L.s(shizuku ? R.string.err_shizuku_launch : R.string.err_su_exec, e.getMessage());
             close();
             return false;
         }
     }
 
     public synchronized JSONObject call(String cmd) throws IOException {
-        if (writer == null) throw new IOException("root 进程未启动");
+        if (writer == null) throw new IOException(L.s(R.string.err_proc_not_started));
         writer.write(cmd);
         writer.write('\n');
         writer.flush();
@@ -105,14 +105,17 @@ public final class RootSession {
         while ((line = readLineTimeout(deadline)) != null) {
             if (line.startsWith("@@")) {
                 try {
-                    return new JSONObject(line.substring(2));
+                    JSONObject o = new JSONObject(line.substring(2));
+                    // root 端的提示是文字令牌（\u0001…），在这里按当前语言统一换成文字
+                    if (line.contains("\\u0001")) L.trJson(o);
+                    return o;
                 } catch (Exception e) {
                     throw new IOException("bad response: " + e.getMessage());
                 }
             }
         }
         close();
-        throw new IOException("root 进程已退出 " + lastError);
+        throw new IOException(L.s(R.string.err_proc_exited, lastError));
     }
 
     /**
@@ -134,14 +137,14 @@ public final class RootSession {
                 Thread.sleep(50);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new IOException("读取被中断", e);
+                throw new IOException(L.s(R.string.err_interrupted), e);
             }
         }
     }
 
     /** 超时中止：close 关闭 stdin 后孤儿 app_process 会自行退出，再强杀确保清理。 */
     private void abortTimeout() {
-        lastError = "后台进程超过 " + CALL_TIMEOUT_MS / 1000 + " 秒没有响应，已强制结束";
+        lastError = L.s(R.string.err_timeout, CALL_TIMEOUT_MS / 1000);
         Process p = process;
         close();
         if (p != null) {

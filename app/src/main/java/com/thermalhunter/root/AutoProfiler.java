@@ -20,7 +20,7 @@ import java.util.Set;
  * 低频采样，持续给出每个 LSPosed 模块实际消耗的 CPU。
  *
  * 开销控制：
- * - 只有 App 在取数据（界面可见 / 悬浮窗开启）时才运行，20 秒没人取数据就暂停；
+ * - 只有 App 主界面可见时才运行（只开悬浮窗不运行），20 秒没人取数据就暂停；
  * - 每 30 秒一个周期，其中采样 15 秒、40Hz；宿主都很空闲时整个周期跳过；
  * - 最多同时采样 4 个进程。
  */
@@ -71,7 +71,7 @@ final class AutoProfiler implements Runnable {
             try {
                 next = cycle();
             } catch (Throwable e) {
-                latest = error("自动归因出错：" + e);
+                latest = error(T.k("r_prof_error", e));
                 next = PERIOD_MS;
             }
             long spent = SystemClock.elapsedRealtime() - start;
@@ -89,14 +89,14 @@ final class AutoProfiler implements Runnable {
         if (scanner.scans < 2) return 2000;
         if (!Profiler.available()) {
             broken = true;
-            latest = error("系统没有自带 simpleperf，无法自动归因模块占用");
+            latest = error(T.k("r_no_simpleperf"));
             return PERIOD_MS;
         }
         Map<Integer, String> targets = pickTargets();
         if (targets.isEmpty()) {
             // 宿主都很空闲：模块占用视为 0，并逐步衰减旧数据
             decayAll();
-            latest = result(null, Collections.emptyList(), "注入模块的进程都很空闲");
+            latest = result(null, Collections.emptyList(), T.k("r_hosts_idle"));
             return IDLE_RECHECK_MS;
         }
         Profiler.Window w;
@@ -104,7 +104,7 @@ final class AutoProfiler implements Runnable {
             w = Profiler.sample(targets, WINDOW_SEC, FREQ);
         } catch (Exception e) {
             String msg = String.valueOf(e.getMessage());
-            if (msg.contains("没有自带")) broken = true;
+            if (msg.contains("r_no_simpleperf")) broken = true;
             latest = error(msg);
             return PERIOD_MS;
         }

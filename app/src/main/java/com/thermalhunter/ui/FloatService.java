@@ -1,5 +1,6 @@
 package com.thermalhunter.ui;
 
+import com.thermalhunter.core.L;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -84,6 +85,11 @@ public class FloatService extends Service implements Monitor.Listener {
     };
 
     @Override
+    protected void attachBaseContext(Context base) {
+        super.attachBaseContext(L.wrap(base));
+    }
+
+    @Override
     public IBinder onBind(Intent intent) {
         return null;
     }
@@ -146,7 +152,7 @@ public class FloatService extends Service implements Monitor.Listener {
 
     private void goForeground() {
         NotificationManager nm = getSystemService(NotificationManager.class);
-        nm.createNotificationChannel(new NotificationChannel(CHANNEL, "悬浮窗", NotificationManager.IMPORTANCE_LOW));
+        nm.createNotificationChannel(new NotificationChannel(CHANNEL, L.s(R.string.float_channel), NotificationManager.IMPORTANCE_LOW));
         PendingIntent stop = PendingIntent.getService(this, 0,
                 new Intent(this, FloatService.class).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE);
         PendingIntent open = PendingIntent.getActivity(this, 1,
@@ -154,10 +160,10 @@ public class FloatService extends Service implements Monitor.Listener {
                 PendingIntent.FLAG_IMMUTABLE);
         Notification n = new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(R.drawable.ic_stat)
-                .setContentTitle("热源猎手悬浮窗运行中")
-                .setContentText("熄屏时自动暂停采样")
+                .setContentTitle(L.s(R.string.float_running))
+                .setContentText(L.s(R.string.float_paused_hint))
                 .setContentIntent(open)
-                .addAction(new Notification.Action.Builder(null, "关闭悬浮窗", stop).build())
+                .addAction(new Notification.Action.Builder(null, L.s(R.string.float_close), stop).build())
                 .setOngoing(true)
                 .build();
         if (Build.VERSION.SDK_INT >= 34) {
@@ -204,7 +210,7 @@ public class FloatService extends Service implements Monitor.Listener {
             rowViews[i] = row();
             rows.addView(rowViews[i][0], Ui.lp(-1, -2, 0, i > 0 ? u.dp(4) : 0, 0, 0));
         }
-        emptyRow = u.text("没有明显的热源 👍", 12, u.dim, false);
+        emptyRow = u.text(L.s(R.string.float_no_heat), 12, u.dim, false);
         rows.addView(emptyRow);
         rows.setVisibility(collapsed ? View.GONE : View.VISIBLE);
 
@@ -272,7 +278,7 @@ public class FloatService extends Service implements Monitor.Listener {
         if (bat != null) {
             power.setText(r.discharging
                     ? String.format(Locale.US, "%.2f W", bat.optLong("powerMw") / 1000.0)
-                    : "充电 " + Math.abs(bat.optLong("currentMa")) + " mA");
+                    : L.s(R.string.float_charging, Math.abs(bat.optLong("currentMa"))));
         }
         if (collapsed) return;
         // 进程 / 应用按 CPU，LSP 模块按自动归因的实测 CPU，一起排序取前几名
@@ -317,7 +323,7 @@ public class FloatService extends Service implements Monitor.Listener {
     private void bindRow(View[] v, Entity e) {
         ((GradientDrawable) v[1].getBackground())
                 .setColor(e.level == Analyzer.OK ? Ui.typeColor(e) : u.levelColor(e.level));
-        ((TextView) v[2]).setText(e.type == Analyzer.LSP || e.type == Analyzer.KSU ? u.label(e) + "（模块）" : u.label(e));
+        ((TextView) v[2]).setText(e.type == Analyzer.LSP || e.type == Analyzer.KSU ? L.s(R.string.float_module_suffix, u.label(e)) : u.label(e));
         TextView val = (TextView) v[3];
         val.setText(Analyzer.fmt(value(e)) + "%");
         val.setTextColor(e.level == Analyzer.OK ? u.fg : u.levelColor(e.level));

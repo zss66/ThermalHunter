@@ -1,5 +1,6 @@
 package com.thermalhunter.core;
 
+import com.thermalhunter.R;
 import android.content.pm.PackageManager;
 
 import java.io.IOException;
@@ -21,12 +22,12 @@ public final class ShizukuShell {
     public static String unavailableReason() {
         try {
             if (!Shizuku.pingBinder()) {
-                return "Shizuku 未运行：请安装 Shizuku，并在其中通过「无线调试」启动服务";
+                return L.s(R.string.err_shizuku_not_running);
             }
-            if (Shizuku.isPreV11()) return "Shizuku 版本过旧，请升级到 v11 或更新版本";
+            if (Shizuku.isPreV11()) return L.s(R.string.err_shizuku_old);
             return null;
         } catch (Throwable e) {
-            return "Shizuku 不可用: " + e;
+            return L.s(R.string.err_shizuku_unavail, String.valueOf(e));
         }
     }
 
@@ -67,7 +68,7 @@ public final class ShizukuShell {
         } catch (InvocationTargetException e) {
             throw new IOException(String.valueOf(e.getCause()), e.getCause());
         } catch (Throwable e) {
-            throw new IOException("Shizuku newProcess 不可用: " + e, e);
+            throw new IOException(L.s(R.string.err_shizuku_unavail, "newProcess " + e), e);
         }
     }
 }

@@ -69,7 +69,7 @@ final class LspModules {
         Result r = new Result();
         String path = dbPath();
         if (path == null) {
-            r.error = Sys.exists("/data/adb/lspd") ? "找到 /data/adb/lspd 但没有 modules_config.db" : "未安装 LSPosed";
+            r.error = T.k(Sys.exists("/data/adb/lspd") ? "r_lsp_no_db" : "r_lsp_not_installed");
             return r;
         }
         r.dbPath = path;
@@ -130,7 +130,7 @@ final class LspModules {
             }
             r.available = true;
         } catch (Throwable e) {
-            r.error = "读取 LSPosed 数据库失败: " + e;
+            r.error = T.k("r_lsp_read_failed", e);
         } finally {
             if (db != null) db.close();
         }
@@ -140,7 +140,7 @@ final class LspModules {
     /** 启用/禁用模块。返回 null 表示成功，否则为错误信息。 */
     static String setEnabled(String pkg, boolean enabled) {
         String path = dbPath();
-        if (path == null) return "未找到 LSPosed 数据库";
+        if (path == null) return T.k("r_lsp_db_missing");
         String ctx = fileContext(path);
         SQLiteDatabase db = null;
         try {
@@ -152,7 +152,7 @@ final class LspModules {
                 ContentValues cv = new ContentValues();
                 cv.put(sc.mEnabled, enabled ? 1 : 0);
                 int n = db.update(sc.modules, cv, sc.mPkg + " = ?", new String[]{pkg});
-                if (n == 0) return "数据库中没有该模块: " + pkg;
+                if (n == 0) return T.k("r_lsp_no_module", pkg);
             } else if (sc.state != null) {
                 // 按用户记录的启用状态：更新该模块所有用户的记录；启用时若没有记录则为主用户新建一条
                 ContentValues cv = new ContentValues();
@@ -164,13 +164,13 @@ final class LspModules {
                     ins.put(sc.stPkg, pkg);
                     if (sc.stUser != null) ins.put(sc.stUser, 0);
                     ins.put(sc.stEnabled, 1);
-                    if (db.insert(sc.state, null, ins) < 0) return "写入 LSPosed 启用状态失败";
+                    if (db.insert(sc.state, null, ins) < 0) return T.k("r_lsp_write_state_failed");
                 }
             } else {
-                return "暂不支持这个 LSPosed 版本的禁用操作（找不到启用状态列）。请把这条信息截图反馈：\n" + describe(db);
+                return T.k("r_lsp_unsupported", describe(db));
             }
         } catch (Throwable e) {
-            return "写入 LSPosed 数据库失败: " + e;
+            return T.k("r_lsp_write_failed", e);
         } finally {
             if (db != null) db.close();
             // 保持 SELinux 上下文与原库一致（lspd 需要能读写）
@@ -231,7 +231,7 @@ final class LspModules {
         s.modules = pick(tables, "modules", "module");
         s.scope = pick(tables, "scope", "scopes", "module_scope");
         if (s.modules == null) {
-            s.error = "无法识别的 LSPosed 数据库：没有 modules 表。表结构：\n" + describe(db);
+            s.error = T.k("r_lsp_unknown_db_nomodules", describe(db));
             return s;
         }
         List<String> mc = columns(db, s.modules);
@@ -239,7 +239,7 @@ final class LspModules {
         s.mApk = pick(mc, "apk_path", "path", "module_apk_path");
         s.mEnabled = pick(mc, "enabled", "enable", "is_enabled");
         if (s.mPkg == null) {
-            s.error = "无法识别的 LSPosed 数据库。表结构：\n" + describe(db);
+            s.error = T.k("r_lsp_unknown_db", describe(db));
             return s;
         }
         String mId = pick(mc, "mid", "module_id", "id", "_id");

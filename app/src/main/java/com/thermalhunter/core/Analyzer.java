@@ -1,5 +1,6 @@
 package com.thermalhunter.core;
 
+import com.thermalhunter.R;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -272,25 +273,25 @@ public final class Analyzer {
             String c = fmt(e.cpuAvg);
             switch (e.type) {
                 case APP:
-                    if (e.cpuAvg >= CPU_HIGH) bad(e, "持续高 CPU " + c + "%");
-                    else if (e.minAdj >= 900 && e.cpuAvg >= CPU_CACHED) bad(e, "已进入缓存(后台冻结级)仍在占用 CPU " + c + "%");
-                    else if (e.minAdj >= 200 && e.cpuAvg >= CPU_BG) bad(e, "后台高 CPU " + c + "%");
-                    if (r.discharging && !e.foreground && e.wlFrac >= WL_FRAC_BAD) bad(e, "后台持有唤醒锁 " + Math.round(e.wlFrac * 100) + "% 时间（阻止深睡）");
-                    if (e.alarmsPerMin >= ALARM_PER_MIN_BAD) bad(e, "频繁唤醒系统 " + fmt(e.alarmsPerMin) + " 次/分钟");
+                    if (e.cpuAvg >= CPU_HIGH) bad(e, L.s(R.string.an_high_cpu, c));
+                    else if (e.minAdj >= 900 && e.cpuAvg >= CPU_CACHED) bad(e, L.s(R.string.an_cached_cpu, c));
+                    else if (e.minAdj >= 200 && e.cpuAvg >= CPU_BG) bad(e, L.s(R.string.an_bg_cpu, c));
+                    if (r.discharging && !e.foreground && e.wlFrac >= WL_FRAC_BAD) bad(e, L.s(R.string.an_bg_wl, Math.round(e.wlFrac * 100)));
+                    if (e.alarmsPerMin >= ALARM_PER_MIN_BAD) bad(e, L.s(R.string.an_alarms, fmt(e.alarmsPerMin)));
                     break;
                 case NATIVE:
                     if (e.ksuId != null) {
-                        e.tags.add("KSU模块: " + e.ksuId);
-                        if (e.cpuAvg >= CPU_KSU) bad(e, "KSU 模块进程占用 CPU " + c + "%");
+                        e.tags.add(L.s(R.string.an_tag_ksu, e.ksuId));
+                        if (e.cpuAvg >= CPU_KSU) bad(e, L.s(R.string.an_ksu_proc_cpu, c));
                     } else if (e.cpuAvg >= CPU_NATIVE) {
-                        bad(e, "native 进程持续高 CPU " + c + "%");
+                        bad(e, L.s(R.string.an_native_cpu, c));
                     }
                     break;
                 case KERNEL:
-                    if (e.cpuAvg >= CPU_KERNEL_WARN) warn(e, "内核线程高负载 " + c + "%（通常由驱动/模块/IO 引起，无法直接杀死）");
+                    if (e.cpuAvg >= CPU_KERNEL_WARN) warn(e, L.s(R.string.an_kernel_load, c));
                     break;
             }
-            if (e.foreground && e.level == BAD) e.tags.add("前台");
+            if (e.foreground && e.level == BAD) e.tags.add(L.s(R.string.adj_fg));
             e.heat = e.cpuAvg + Math.max(0, e.wlFrac) * 20 + Math.min(30, Math.max(0, e.alarmsPerMin)) * 0.5
                     + (e.level == BAD ? 1000 : 0);
         }
@@ -331,24 +332,24 @@ public final class Analyzer {
                 }
                 JSONArray tags = m.optJSONArray("tags");
                 if (tags != null) for (int t = 0; t < tags.length(); t++) e.tags.add(tags.optString(t));
-                if (!e.enabled) e.tags.add(0, "已禁用");
-                if (m.optBoolean("remove")) e.tags.add(0, "待删除");
-                if (e.enabled && e.cpuAvg >= CPU_KSU) bad(e, "模块进程合计 CPU " + fmt(e.cpuAvg) + "%");
+                if (!e.enabled) e.tags.add(0, L.s(R.string.tag_disabled));
+                if (m.optBoolean("remove")) e.tags.add(0, L.s(R.string.tag_pending_removal));
+                if (e.enabled && e.cpuAvg >= CPU_KSU) bad(e, L.s(R.string.an_module_cpu, fmt(e.cpuAvg)));
                 // Zygisk 等方式注入到其他进程里的 Java 代码（如 HMA-OSS），由自动归因实测
                 e.measured = profMods == null ? null : profMods.optJSONObject("ksu:" + e.ksuId);
                 if (e.measured != null) {
                     e.measuredCpu = e.measured.optDouble("cpu", 0);
                     String where = topProc(e.measured);
                     if (e.enabled && e.measuredCpu >= LSP_MEASURED_BAD) {
-                        bad(e, "注入的代码实测占用 " + fmt(e.measuredCpu) + "% 单核" + where);
+                        bad(e, L.s(R.string.an_injected_measured, fmt(e.measuredCpu), where));
                     } else if (e.enabled && e.measuredCpu >= LSP_MEASURED_WARN) {
-                        warn(e, "注入的代码实测占用 " + fmt(e.measuredCpu) + "% 单核" + where);
+                        warn(e, L.s(R.string.an_injected_measured, fmt(e.measuredCpu), where));
                     }
                 }
-                if (e.enabled && maxT >= 45 && (e.tags.contains("替换温控配置") || e.tags.contains("脚本操作温控"))) {
-                    warn(e, "当前温度 " + fmt(maxT) + "°C，且该模块修改了温控，可能是发热原因");
+                if (e.enabled && maxT >= 45 && (e.tags.contains(L.s(R.string.ksu_tag_thermal_replace)) || e.tags.contains(L.s(R.string.ksu_tag_script_thermal)))) {
+                    warn(e, L.s(R.string.an_thermal_mod, fmt(maxT)));
                 }
-                if (e.enabled && e.tags.contains("持有内核唤醒锁")) warn(e, "脚本会写 /sys/power/wake_lock，可能阻止深睡");
+                if (e.enabled && e.tags.contains(L.s(R.string.ksu_tag_wakelock))) warn(e, L.s(R.string.an_wakelock_script));
                 e.heat = e.cpuAvg + Math.max(0, e.measuredCpu) + (e.level == BAD ? 1000 : e.level == WARN ? 100 : 0) + (e.enabled ? 1 : 0);
                 r.ksu.add(e);
             }
@@ -385,7 +386,7 @@ public final class Analyzer {
                     if (sc != null) for (int k = 0; k < sc.length(); k++) {
                         JSONObject so = sc.optJSONObject(k);
                         String sp = so.optString("pkg");
-                        e.scopes.add(sp + (so.optInt("user") != 0 ? " (用户" + so.optInt("user") + ")" : ""));
+                        e.scopes.add(so.optInt("user") != 0 ? L.s(R.string.an_scope_user, sp, so.optInt("user")) : sp);
                         if ("system".equals(sp) || "android".equals(sp)) {
                             // system_server 由所有注入系统框架的模块共享，不能把它的 CPU 算到某一个模块头上
                             injectsSystem = true;
@@ -409,27 +410,26 @@ public final class Analyzer {
                         e.measured = profMods == null ? null : profMods.optJSONObject(e.lspPkg);
                         e.measuredCpu = e.measured == null ? 0 : e.measured.optDouble("cpu", 0);
                     }
-                    e.sub = "作用域 " + e.scopes.size() + " 个，运行中 " + e.scopeRunning + " 个";
-                    if (!e.enabled) e.tags.add("已禁用");
-                    if (injectsSystem) e.tags.add("注入系统框架");
-                    if (e.scopes.size() >= 30) e.tags.add("作用域过大");
+                    e.sub = L.s(R.string.an_scope_sub, e.scopes.size(), e.scopeRunning);
+                    if (!e.enabled) e.tags.add(L.s(R.string.tag_disabled));
+                    if (injectsSystem) e.tags.add(L.s(R.string.tag_injects_system));
+                    if (e.scopes.size() >= 30) e.tags.add(L.s(R.string.tag_scope_too_large));
                     if (e.enabled && !e.isSelf) {
-                        if (e.cpuAvg >= CPU_LSP_SELF && e.minAdj > 0) bad(e, "模块自身后台进程 CPU " + fmt(e.cpuAvg) + "%");
+                        if (e.cpuAvg >= CPU_LSP_SELF && e.minAdj > 0) bad(e, L.s(R.string.an_lsp_self_cpu, fmt(e.cpuAvg)));
                         if (e.measuredCpu >= 0) {
                             // 实测：按调用栈归属到本模块的 CPU
                             String where = topProc(e.measured);
                             if (e.measuredCpu >= LSP_MEASURED_BAD) {
-                                bad(e, "模块代码实测占用 " + fmt(e.measuredCpu) + "% 单核" + where);
+                                bad(e, L.s(R.string.an_lsp_measured, fmt(e.measuredCpu), where));
                             } else if (e.measuredCpu >= LSP_MEASURED_WARN) {
-                                warn(e, "模块代码实测占用 " + fmt(e.measuredCpu) + "% 单核" + where);
+                                warn(e, L.s(R.string.an_lsp_measured, fmt(e.measuredCpu), where));
                             }
                         } else if (!badScoped.isEmpty()) {
-                            warn(e, "作用域内异常应用: " + join(badScoped) + "（宿主本身也可能就是热源，可禁用此模块对比）");
+                            warn(e, L.s(R.string.an_scope_bad_apps, join(badScoped)));
                         }
                         if (e.measuredCpu < 0 && injectsSystem && systemServer != null && systemServer.cpuAvg >= 15) {
                             // 只作提示，不标记可疑：无法确定是哪一个模块造成的
-                            e.warnings.add("system_server CPU " + fmt(systemServer.cpuAvg) + "%，由所有注入系统框架的模块共用，"
-                                    + "无法区分各模块的实际占用；如怀疑可逐个禁用后重启对比");
+                            e.warnings.add(L.s(R.string.an_system_server_shared, fmt(systemServer.cpuAvg)));
                         }
                     }
                     e.heat = (e.measuredCpu >= 0 ? e.measuredCpu * 10 : e.scopeCpu * 0.3) + e.cpuAvg
@@ -473,7 +473,7 @@ public final class Analyzer {
                 best = k;
             }
         }
-        return best == null ? "" : "（主要在 " + best + "）";
+        return best == null ? "" : L.s(R.string.an_where, best);
     }
 
     static boolean isSocZone(String t) {
@@ -498,10 +498,9 @@ public final class Analyzer {
     private static String join(List<String> l) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < l.size() && i < 4; i++) {
-            if (i > 0) sb.append("、");
+            if (i > 0) sb.append(L.s(R.string.list_sep));
             sb.append(l.get(i));
         }
-        if (l.size() > 4) sb.append(" 等").append(l.size()).append("个");
-        return sb.toString();
+        return l.size() > 4 ? L.s(R.string.list_more, sb, l.size()) : sb.toString();
     }
 }

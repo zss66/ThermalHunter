@@ -69,40 +69,40 @@ final class Actions {
     /** KILL <pid> [期望的进程名]：校验进程名，防止 pid 复用误杀。 */
     JSONObject kill(int pid, String expect) throws Exception {
         String name = procName(pid);
-        if (name == null) return ok("进程已不存在");
+        if (name == null) return ok(T.k("r_proc_gone"));
         if (expect != null && !expect.isEmpty() && !name.startsWith(expect) && !name.endsWith(expect)
                 && !expect.startsWith(name)) {
-            return fail("pid " + pid + " 已变为 " + name + "，已取消");
+            return fail(T.k("r_pid_reused", pid, name));
         }
-        if (isProtectedProc(pid)) return fail(name + " 是受保护的系统关键进程");
+        if (isProtectedProc(pid)) return fail(T.k("r_proc_protected", name));
         try {
             Os.kill(pid, 9);
-            return ok("已杀死 " + name + " (" + pid + ")");
+            return ok(T.k("r_killed", name, pid));
         } catch (Throwable e) {
-            if (Os.getuid() != 0) return fail("Shizuku 模式没有权限杀死 " + name + "（需要 root）");
-            return fail("kill 失败: " + e);
+            if (Os.getuid() != 0) return fail(T.k("r_kill_no_perm", name));
+            return fail(T.k("r_kill_failed", e));
         }
     }
 
     JSONObject forceStop(String pkg, int user) throws Exception {
-        if (!Sys.isSafeToken(pkg)) return fail("非法包名");
-        if (PROTECTED_PKGS.contains(pkg)) return fail(pkg + " 受保护，不能强行停止");
+        if (!Sys.isSafeToken(pkg)) return fail(T.k("r_bad_pkg"));
+        if (PROTECTED_PKGS.contains(pkg)) return fail(T.k("r_pkg_protected_stop", pkg));
         Object[] r = Sys.exec("am", "force-stop", "--user", String.valueOf(user), pkg);
-        return (int) r[0] == 0 ? ok("已强行停止 " + pkg) : fail("force-stop 失败: " + r[1]);
+        return (int) r[0] == 0 ? ok(T.k("r_force_stopped", pkg)) : fail(T.k("r_force_stop_failed", r[1]));
     }
 
     JSONObject setAppEnabled(String pkg, int user, boolean enable) throws Exception {
-        if (!Sys.isSafeToken(pkg)) return fail("非法包名");
-        if (!enable && PROTECTED_PKGS.contains(pkg)) return fail(pkg + " 受保护，不能停用");
+        if (!Sys.isSafeToken(pkg)) return fail(T.k("r_bad_pkg"));
+        if (!enable && PROTECTED_PKGS.contains(pkg)) return fail(T.k("r_pkg_protected_disable", pkg));
         Object[] r = enable
                 ? Sys.exec("pm", "enable", "--user", String.valueOf(user), pkg)
                 : Sys.exec("pm", "disable-user", "--user", String.valueOf(user), pkg);
-        return (int) r[0] == 0 ? ok((enable ? "已启用 " : "已停用(冻结) ") + pkg) : fail(String.valueOf(r[1]));
+        return (int) r[0] == 0 ? ok(T.k(enable ? "r_app_enabled" : "r_app_disabled", pkg)) : fail(String.valueOf(r[1]));
     }
 
     /** 杀死归属于某 KSU 模块的所有进程。 */
     JSONObject killKsuProcs(String id) throws Exception {
-        if (!Sys.isSafeToken(id)) return fail("非法模块 id");
+        if (!Sys.isSafeToken(id)) return fail(T.k("r_bad_module_id"));
         List<Integer> targets = new ArrayList<>();
         synchronized (scanner.lastProcs) {
             for (Scanner.Proc p : scanner.lastProcs) if (id.equals(p.ksu)) targets.add(p.pid);
@@ -121,15 +121,15 @@ final class Actions {
             } catch (Throwable ignored) {
             }
         }
-        JSONObject o = ok("模块 " + id + "：已杀死 " + killed + " 个进程");
+        JSONObject o = ok(T.k("r_module_killed", id, killed));
         o.put("skipped", skipped);
         return o;
     }
 
     JSONObject setKsuEnabled(String id, boolean enable) throws Exception {
-        if (!Sys.isSafeToken(id)) return fail("非法模块 id");
+        if (!Sys.isSafeToken(id)) return fail(T.k("r_bad_module_id"));
         String dir = KsuModules.MODULES_DIR + "/" + id;
-        if (!new File(dir).isDirectory()) return fail("模块不存在: " + id);
+        if (!new File(dir).isDirectory()) return fail(T.k("r_module_missing", id));
         String ksud = Sys.exists("/data/adb/ksud") ? "/data/adb/ksud" : null;
         boolean done = false;
         String detail = "";
@@ -148,19 +148,19 @@ final class Actions {
             }
         }
         KsuModules.invalidate();
-        if (!done) return fail("操作失败: " + detail);
+        if (!done) return fail(T.k("op_failed", detail));
         if (!enable) {
             JSONObject k = killKsuProcs(id);
-            return ok("已禁用模块 " + id + "（重启后完全生效）；" + k.optString("msg"));
+            return ok(T.k("r_module_disabled", id) + "\n" + k.optString("msg"));
         }
-        return ok("已启用模块 " + id + "（重启后生效）");
+        return ok(T.k("r_module_enabled", id));
     }
 
     JSONObject setLspEnabled(String pkg, boolean enable) throws Exception {
-        if (!Sys.isSafeToken(pkg)) return fail("非法包名");
+        if (!Sys.isSafeToken(pkg)) return fail(T.k("r_bad_pkg"));
         String err = LspModules.setEnabled(pkg, enable);
         if (err != null) return fail(err);
-        String msg = (enable ? "已在 LSPosed 中启用 " : "已在 LSPosed 中禁用 ") + pkg + "（重启手机后生效）";
+        String msg = T.k(enable ? "r_lsp_enabled" : "r_lsp_disabled", pkg);
         if (!enable && !PROTECTED_PKGS.contains(pkg)) {
             // 同时结束模块自身的进程（若它在跑后台服务）
             Sys.exec("am", "force-stop", pkg);
@@ -171,6 +171,6 @@ final class Actions {
     JSONObject reboot() throws Exception {
         Sys.exec("svc", "power", "reboot", "thermalhunter");
         Object[] r = Sys.exec("reboot");
-        return (int) r[0] == 0 ? ok("正在重启") : fail(String.valueOf(r[1]));
+        return (int) r[0] == 0 ? ok(T.k("r_rebooting")) : fail(String.valueOf(r[1]));
     }
 }

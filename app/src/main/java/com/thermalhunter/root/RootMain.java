@@ -94,14 +94,16 @@ public final class RootMain {
         if (Os.getuid() != 0 && needsRoot(a[0])) {
             JSONObject o = new JSONObject();
             o.put("ok", false);
-            o.put("error", "Shizuku 模式下不可用（需要 root）");
+            o.put("error", T.k("r_shizuku_unavailable"));
             return o;
         }
         switch (a[0]) {
             case "SNAPSHOT": {
                 Display.hold();
                 JSONObject snap = s.snapshot();
-                JSONObject prof = autoProfiler == null ? null : autoProfiler.poll();
+                // "SNAPSHOT 0"：只有悬浮窗在看，不需要自动归因（不续期，采样会在 20 秒后暂停）
+                boolean wantProf = !(a.length > 1 && "0".equals(a[1]));
+                JSONObject prof = autoProfiler == null || !wantProf ? null : autoProfiler.poll();
                 if (prof != null) snap.put("prof", prof);
                 return snap;
             }

@@ -1,5 +1,7 @@
 package com.thermalhunter.ui;
 
+import com.thermalhunter.core.L;
+import com.thermalhunter.R;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -49,9 +51,9 @@ final class CompatFix {
         runAsync(() -> {
             try {
                 Status st = readStatus();
-                deliver(cb, true, st.active ? "已启用" : "未启用", st);
+                deliver(cb, true, L.s(st.active ? R.string.compat_on : R.string.compat_off), st);
             } catch (Throwable e) {
-                deliver(cb, false, "需要 root（KSU）权限", null);
+                deliver(cb, false, L.s(R.string.compat_need_root), null);
             }
         });
     }
@@ -65,30 +67,30 @@ final class CompatFix {
                             + " && mount --bind " + SRC + " " + TARGET);
                     Status st = readStatus();
                     if (st.active) {
-                        deliver(cb, true, "已启用：加固应用将读到 enforce=0（真实 SELinux 状态不变）", st);
+                        deliver(cb, true, L.s(R.string.compat_enabled_msg), st);
                     } else {
-                        deliver(cb, false, "挂载未生效（读回 enforce=" + st.value + "，可能被内核钩子拦截）", st);
+                        deliver(cb, false, L.s(R.string.compat_mount_fail, String.valueOf(st.value)), st);
                     }
                 } else {
                     // 双重 umount 兜底叠加挂载；保留影子文件（16 字节，重启用作下次挂载源）
                     su("umount " + TARGET + " 2>/dev/null; umount " + TARGET + " 2>/dev/null");
                     Status st = readStatus();
                     if (!st.active) {
-                        deliver(cb, true, "已还原：enforce 文件恢复真实状态", st);
+                        deliver(cb, true, L.s(R.string.compat_restored), st);
                     } else {
-                        deliver(cb, false, "umount 未生效，请重试", st);
+                        deliver(cb, false, L.s(R.string.compat_umount_fail), st);
                     }
                 }
             } catch (Throwable e) {
-                deliver(cb, false, "操作失败: " + e.getMessage(), null);
+                deliver(cb, false, L.s(R.string.op_failed, e.getMessage()), null);
             }
         });
     }
 
     /** 菜单卡片描述文案。 */
     static String desc(Status st) {
-        if (st == null) return "正在检测状态…";
-        return st.active ? "已启用 · 影子生效中（点击管理）" : "未启用 · 点击开启";
+        if (st == null) return L.s(R.string.compat_checking);
+        return L.s(st.active ? R.string.compat_desc_on : R.string.compat_desc_off);
     }
 
     /** 生效判定：影子文件存在且 enforce 读回 0。 */
@@ -119,7 +121,7 @@ final class CompatFix {
         }
         if (!pr.waitFor(10, TimeUnit.SECONDS)) {
             pr.destroyForcibly();
-            throw new IllegalStateException("su 超时");
+            throw new IllegalStateException(L.s(R.string.su_timeout));
         }
         return sb.toString();
     }

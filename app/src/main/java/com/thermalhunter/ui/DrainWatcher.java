@@ -1,5 +1,6 @@
 package com.thermalhunter.ui;
 
+import com.thermalhunter.core.L;
 import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -103,6 +104,7 @@ public final class DrainWatcher extends BroadcastReceiver {
     private static void check(Context c) throws Exception {
         JSONObject rep = readViaSu();
         if (rep == null || !rep.optBoolean("ok")) return;
+        L.trJson(rep); // 组件名等是文字令牌（解析代码与 root 端共用）
         DrainStats.analyze(rep, c.getPackageName());
         record(c, rep);
         if (!isCharging(c)) notifyIssues(c, rep);
@@ -156,14 +158,14 @@ public final class DrainWatcher extends BroadcastReceiver {
             if (o.optInt("level") != DrainStats.BAD) continue;
             if (!done.add("uid:" + o.optInt("uid"))) continue;
             JSONArray r = o.optJSONArray("reasons");
-            lines.add(label(c, o) + "：" + (r != null && r.length() > 0 ? r.optString(0) : "后台耗电异常"));
+            lines.add(L.s(R.string.label_colon, label(c, o), r != null && r.length() > 0 ? r.optString(0) : L.s(R.string.drain_bg_abnormal)));
         }
         p.edit().putLong("drain_notified_cycle", cycle).putStringSet("drain_notified", done).apply();
         if (lines.isEmpty()) return;
 
         NotificationManager nm = c.getSystemService(NotificationManager.class);
         if (nm == null) return;
-        nm.createNotificationChannel(new NotificationChannel(CHANNEL, "耗电异常提醒", NotificationManager.IMPORTANCE_DEFAULT));
+        nm.createNotificationChannel(new NotificationChannel(CHANNEL, L.s(R.string.drain_channel), NotificationManager.IMPORTANCE_DEFAULT));
         PendingIntent open = PendingIntent.getActivity(c, 2,
                 new Intent(c, MainActivity.class).putExtra(MainActivity.EXTRA_PAGE, MainActivity.PAGE_DRAIN)
                         .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_NEW_TASK),
@@ -171,7 +173,7 @@ public final class DrainWatcher extends BroadcastReceiver {
         String text = String.join("\n", lines);
         Notification n = new Notification.Builder(c, CHANNEL)
                 .setSmallIcon(R.drawable.ic_stat)
-                .setContentTitle(lines.size() == 1 ? "发现耗电异常" : "发现 " + lines.size() + " 项耗电异常")
+                .setContentTitle(lines.size() == 1 ? L.s(R.string.drain_found_one) : L.s(R.string.drain_found_n, lines.size()))
                 .setContentText(lines.get(0))
                 .setStyle(new Notification.BigTextStyle().bigText(text))
                 .setContentIntent(open)
@@ -262,23 +264,23 @@ public final class DrainWatcher extends BroadcastReceiver {
         int appId = uid % 100000;
         if (appId < 10000) {
             switch (appId) {
-                case 0: return "内核与 root 进程";
-                case 1000: return "Android 系统";
-                case 1001: return "电话服务";
-                case 1002: return "蓝牙";
+                case 0: return L.s(R.string.uid_kernel);
+                case 1000: return L.s(R.string.uid_android);
+                case 1001: return L.s(R.string.uid_phone);
+                case 1002: return L.s(R.string.uid_bt);
                 case 1010: return "WLAN";
-                case 1013: return "媒体服务";
-                case 1021: return "GPS 服务";
+                case 1013: return L.s(R.string.uid_media);
+                case 1021: return L.s(R.string.uid_gps);
                 case 1027: return "NFC";
-                case 1041: return "音频服务";
-                case 1047: return "相机服务";
-                case 1066: return "统计服务";
+                case 1041: return L.s(R.string.uid_audio);
+                case 1047: return L.s(R.string.uid_camera);
+                case 1066: return L.s(R.string.uid_stats);
                 case 2000: return "Shell";
-                default: return "系统进程（uid " + appId + "）";
+                default: return L.s(R.string.uid_system_proc, appId);
             }
         }
         JSONArray pk = app.optJSONArray("pkgs");
-        if (pk == null || pk.length() == 0) return "已卸载的应用（uid " + uid + "）";
+        if (pk == null || pk.length() == 0) return L.s(R.string.uid_uninstalled, uid);
         String first = pk.optString(0);
         String name = first;
         try {
@@ -287,7 +289,7 @@ public final class DrainWatcher extends BroadcastReceiver {
             name = pm.getApplicationLabel(ai).toString();
         } catch (Throwable ignored) {
         }
-        return pk.length() > 1 ? name + " 等" : name;
+        return pk.length() > 1 ? L.s(R.string.name_and_more, name) : name;
     }
 
     // ------------------------------------------------------------------ 文件

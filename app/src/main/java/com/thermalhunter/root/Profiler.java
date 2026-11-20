@@ -78,7 +78,7 @@ final class Profiler {
      * @param targets pid → 进程名
      */
     static Window sample(Map<Integer, String> targets, int seconds, int freq) throws Exception {
-        if (!available()) throw new Exception("系统没有自带 simpleperf（" + SIMPLEPERF + "）");
+        if (!available()) throw new Exception(T.k("r_no_simpleperf_at", SIMPLEPERF));
         StringBuilder pids = new StringBuilder();
         for (int pid : targets.keySet()) pids.append(pids.length() > 0 ? "," : "").append(pid);
         new File(DATA).delete();
@@ -94,7 +94,7 @@ final class Profiler {
         }
         long w1 = System.nanoTime();
         if ((int) r[0] != 0 || !new File(DATA).exists()) {
-            throw new Exception("simpleperf 采样失败：" + tail(String.valueOf(r[1])));
+            throw new Exception(T.k("r_perf_sample_failed", tail(String.valueOf(r[1]))));
         }
         // 线程 → 所属进程（report-sample 只给线程号）
         Map<Integer, String> tidToProc = new HashMap<>();
@@ -110,7 +110,7 @@ final class Profiler {
         try {
             Object[] rep = Sys.execToFile(new File(TEXT), SIMPLEPERF, "report-sample", "-i", DATA, "--show-callchain");
             if ((int) rep[0] != 0 || !new File(TEXT).exists()) {
-                throw new Exception("simpleperf 解析失败：" + tail(String.valueOf(rep[1])));
+                throw new Exception(T.k("r_perf_parse_failed", tail(String.valueOf(rep[1]))));
             }
             Map<String, Set<String>> classToModules = classMap();
             Window w = new Window();

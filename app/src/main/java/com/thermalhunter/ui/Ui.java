@@ -1,5 +1,7 @@
 package com.thermalhunter.ui;
 
+import com.thermalhunter.core.L;
+import com.thermalhunter.R;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
@@ -246,11 +248,11 @@ final class Ui {
 
     static String typeName(Entity e) {
         switch (e.type) {
-            case Analyzer.APP: return "应用";
-            case Analyzer.NATIVE: return e.ksuId != null ? "模块进程" : "系统进程";
-            case Analyzer.KERNEL: return "内核线程";
-            case Analyzer.KSU: return "KSU模块";
-            default: return "LSP模块";
+            case Analyzer.APP: return L.s(R.string.type_app);
+            case Analyzer.NATIVE: return L.s(e.ksuId != null ? R.string.type_module_proc : R.string.type_system_proc);
+            case Analyzer.KERNEL: return L.s(R.string.type_kernel);
+            case Analyzer.KSU: return L.s(R.string.type_ksu);
+            default: return L.s(R.string.type_lsp);
         }
     }
 
@@ -296,19 +298,19 @@ final class Ui {
     }
 
     static String adjName(int adj) {
-        if (adj < 0) return "系统常驻";
-        if (adj == 0) return "前台";
-        if (adj < 200) return "可见";
-        if (adj < 300) return "前台服务";
-        if (adj < 900) return "后台服务";
-        return "缓存";
+        if (adj < 0) return L.s(R.string.adj_persistent);
+        if (adj == 0) return L.s(R.string.adj_fg);
+        if (adj < 200) return L.s(R.string.adj_visible);
+        if (adj < 300) return L.s(R.string.adj_fg_service);
+        if (adj < 900) return L.s(R.string.adj_bg_service);
+        return L.s(R.string.adj_cached);
     }
 
     static String dur(long ms) {
         long s = ms / 1000;
-        if (s < 60) return s + "秒";
-        if (s < 3600) return (s / 60) + "分" + (s % 60) + "秒";
-        return (s / 3600) + "时" + (s % 3600 / 60) + "分";
+        if (s < 60) return L.s(R.string.dur_s, s);
+        if (s < 3600) return L.s(R.string.dur_ms, s / 60, s % 60);
+        return L.s(R.string.dur_hm, s / 3600, s % 3600 / 60);
     }
 
     static String freq(long mhz) {
@@ -330,9 +332,9 @@ final class Ui {
 
     /** 主温度：SoC → 机身 → 电池，依次回退。返回 {温度, 名称}。 */
     static Object[] mainTemp(Analyzer.Result r) {
-        if (r.maxTemp > -999) return new Object[]{r.maxTemp, "SoC 温度"};
-        if (r.skinTemp > -999) return new Object[]{r.skinTemp, "机身温度"};
-        return new Object[]{r.batteryTemp, "电池温度"};
+        if (r.maxTemp > -999) return new Object[]{r.maxTemp, L.s(R.string.temp_soc)};
+        if (r.skinTemp > -999) return new Object[]{r.skinTemp, L.s(R.string.temp_skin)};
+        return new Object[]{r.batteryTemp, L.s(R.string.temp_battery)};
     }
 
     // ------------------------------------------------------------------ 圆角细进度条

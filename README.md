@@ -16,9 +16,15 @@
 | 一键清理 | 强行停止异常应用、杀死异常进程和模块进程；可在设置中开启"直接**禁用**异常的 KSU / LSP 模块" |
 | 单项操作 | 应用：强行停止 / 停用（冻结）/ 重新启用；进程：杀死；KSU 模块：禁用 / 启用（优先 `ksud module disable`，失败则写 `disable` 标记文件）；LSP 模块：禁用 / 启用 |
 | 悬浮窗 | 在任意界面上方实时显示温度、功耗和发热最高的 5 个进程 / 应用；可拖动，轻点展开 / 收起；通知栏常驻并可一键关闭，熄屏自动暂停采样 |
-| 模块自动归因 | （root）用系统自带的 simpleperf 每 30 秒低频采样一次注入了模块且在占用 CPU 的进程（system_server、被作用的应用），解析模块 APK 的 dex 类名，按调用栈算出每个 LSPosed 模块实际消耗的 CPU，并据此判定异常；只在界面或悬浮窗开启时运行，可在设置中关闭 |
+| 模块自动归因 | （root）用系统自带的 simpleperf 每 30 秒低频采样一次注入了模块且在占用 CPU 的进程（system_server、被作用的应用），解析模块 APK 的 dex 类名，按调用栈算出每个 LSPosed 模块实际消耗的 CPU，并据此判定异常；只在打开本应用界面时运行（只开悬浮窗时不运行），可在设置中关闭 |
 | VPN 隐身 | 对所选应用在其进程内让 VPN / 代理检测 API（NetworkCapabilities、NetworkInterface）报告「无 VPN」；需在 LSPosed 作用域里包含这些应用。补齐内核层 vpnhide 模块挡不住的框架 API 检测 |
 | 刷新率 | （root/shell）读取屏幕支持的刷新率，一键锁定全局 min/peak，高刷对所有应用统一生效，不再被系统按应用限频 |
+
+## 界面语言
+
+设置 → 语言：跟随系统（默认）/ 简体中文 / 繁體中文 / English / 日本語 / 한국어 / Русский / Deutsch / Français。系统语言不在其中时显示英文。
+
+文字在 `app/src/main/res/values*/strings.xml`（`values` 为英文）。root 端进程读不到 App 资源，它返回的提示用 `root/T.java` 写成文字令牌，由 App 端 `core/L.java` 按当前语言换成文字。
 
 ## 工作模式
 

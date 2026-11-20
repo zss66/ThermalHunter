@@ -101,11 +101,11 @@ final class KsuModules {
                     String low = rel.toLowerCase();
                     if (low.contains("thermal") || low.contains("thermal-engine") || low.contains("mtk_thermal")
                             || low.endsWith(".mtc") || low.contains("/thermal/")) {
-                        m.tags.add("替换温控配置");
+                        m.tags.add(T.k("ksu_tag_thermal_replace"));
                     }
                     if (low.contains("powerhal") || low.contains("perfmgr") || low.contains("powerscntbl")
                             || low.contains("perf_config") || low.contains("fpsgo")) {
-                        m.tags.add("修改性能/调度配置");
+                        m.tags.add(T.k("ksu_tag_perf_config"));
                     }
                 }
             }
@@ -116,17 +116,17 @@ final class KsuModules {
                 if (c != null) scripts.append(c).append('\n');
             }
             String sc = scripts.toString();
-            if (sc.contains("thermal") || sc.contains("/sys/class/thermal") || sc.contains("thermal_core")) m.tags.add("脚本操作温控");
+            if (sc.contains("thermal") || sc.contains("/sys/class/thermal") || sc.contains("thermal_core")) m.tags.add(T.k("ksu_tag_script_thermal"));
             if (sc.contains("scaling_min_freq") || sc.contains("scaling_governor") || sc.contains("cpu_boost")
                     || sc.contains("ged_kpi") || sc.contains("/proc/ppm") || sc.contains("cpuset") || sc.contains("uclamp")) {
-                m.tags.add("脚本修改调度/频率");
+                m.tags.add(T.k("ksu_tag_script_sched"));
             }
             if ((sc.contains("while true") || sc.contains("while :") || sc.contains("while [ 1 ]") || sc.contains("until false"))
                     && sc.contains("sleep")) {
-                m.tags.add("常驻循环脚本");
+                m.tags.add(T.k("ksu_tag_loop_script"));
             }
-            if (sc.contains("/sys/power/wake_lock")) m.tags.add("持有内核唤醒锁");
-            if (m.hasZygisk) m.tags.add("Zygisk注入所有应用");
+            if (sc.contains("/sys/power/wake_lock")) m.tags.add(T.k("ksu_tag_wakelock"));
+            if (m.hasZygisk) m.tags.add(T.k("ksu_tag_zygisk"));
             list.add(m);
         }
         cache = list;

@@ -68,7 +68,7 @@ final class Display {
             Sys.exec("settings", "delete", "system", "min_refresh_rate");
             Sys.exec("settings", "delete", "system", "peak_refresh_rate");
             o.put("ok", true);
-            o.put("msg", "已交还系统控制（锁定会在熄屏/亮屏后释放）");
+            o.put("msg", T.k("r_refresh_released"));
             o.put("current", currentFps());
             return o;
         }
@@ -76,7 +76,7 @@ final class Display {
         Integer idx = modes.get(fps);
         if (idx == null) {
             o.put("ok", false);
-            o.put("error", "该屏幕不支持 " + fps + "Hz");
+            o.put("error", T.k("r_refresh_unsupported", fps));
             return o;
         }
         // AOSP 提示 + SurfaceFlinger 强制
@@ -88,8 +88,8 @@ final class Display {
         int got = currentFps();
         boolean ok = (int) r[0] == 0 && (got == fps || got < 0);
         o.put("ok", ok);
-        if (ok) o.put("msg", "已锁定 " + fps + "Hz（对所有应用生效；热源猎手开启时自动保持，完全退出后交还系统）");
-        else o.put("error", "设置未生效（当前 " + got + "Hz）；可能需在系统设置里关闭「智能切换刷新率」");
+        if (ok) o.put("msg", T.k("r_refresh_locked", fps));
+        else o.put("error", T.k("r_refresh_not_applied", got));
         o.put("current", got);
         return o;
     }
